@@ -32,7 +32,7 @@ Start a new task:
 ```
 python3 .../memory_manager.py start -d "Description" -n "Next step instruction"
 ```
-Creates `MEMORY_TASKS/YYYYMMDD-HHMM_task.md` and updates pointer in MEMORY.md.
+Creates `MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md` and updates pointer in MEMORY.md.
 
 ### update
 Update current task progress:
@@ -46,7 +46,7 @@ Complete current task:
 ```
 python3 .../memory_manager.py complete -d "Completion description"
 ```
-Archives task file, updates MEMORY_ARCHIVE.md, resets status.
+Archives task file, updates MEMORY_ARCHIVE.md, resets status to ✅.
 
 ### add-note
 Add free-form note to scratchpad:
@@ -78,25 +78,36 @@ When user requests memory operations, invoke the appropriate command. After each
 - 技术栈：[stack]
 
 ## 状态机 [Strict]
-- **当前指针**：`MEMORY_TASKS/YYYYMMDD-HHMM_task.md`
+- **当前指针**：`MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md`
 - **全局目标**：[current goal]
 - **最后状态**：[status emoji]
+- **最后动作**：[last action description]
 
 ## 下一步指令 [Strict]
-- [动作] `path` -> [location] 补充 [detail]
+- [动作] `path` -> [位置] 补充 [detail]
 
 ## 暂存与备忘区 (Scratchpad) [Free]
+<!-- notes go here -->
 
 ## 雷区与技术契约 [Strict/Append-only]
+<!-- constraints and pitfalls -->
 
 ## 已归档任务 [Strict/Append-only]
+- [YYYY-MM-DD] [task summary]
 ```
 
 ## Error Handling
 
-- **Concurrent edit detected**: Abort and warn user
-- **MEMORY.md missing**: Auto-create with default template
-- **Task file missing**: Warn but continue
+| Situation | Behavior |
+|-----------|----------|
+| Concurrent edit detected | Abort with error |
+| MEMORY.md missing | Auto-create with default template |
+| Task file missing | Warn but continue (pointer may be stale) |
+| Lock acquisition fails | Exit with error code 1 |
+| SIGTERM / SIGINT received | Release lock automatically before exit |
+| Session crash (unhandled signal) | Lock released via `atexit` on next invocation (may need manual remove in rare cases) |
+
+**Manual lock removal**: Only needed if a process was kill -9'd. Delete `MEMORY_TASKS/.edit_lock` before next operation.
 
 ## Script Location
 
