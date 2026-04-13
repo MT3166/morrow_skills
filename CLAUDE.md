@@ -8,25 +8,25 @@ morrow_skills is a Claude Code extension skill repository. Skills are invoked vi
 
 ## Available Skills
 
-### moss_mem
+### moss-mem
 Project memory management skill. Manages `MEMORY.md` and `MEMORY_TASKS/` directory for cross-session context persistence.
 
 **Trigger phrases:** "initialize memory", "update memory", "start task", "complete task", "add note"
 
-**Script location:** `/Users/mt/.claude/skills/moss_mem/scripts/memory_manager.py`
+**Script location:** `/Users/mt/.claude/skills/moss-mem/scripts/memory_manager.py`
 
 **Commands:**
-- `/moss_mem init` — Initialize memory system
-- `/moss_mem start -d "描述" -n "下一步指令"` — Start new task
-- `/moss_mem update -d "进度" -s "🔧"` — Update task progress
-- `/moss_mem complete -d "完成描述"` — Complete current task
-- `/moss_mem add-note -n "笔记内容"` — Add note to scratchpad
+- `/moss-mem init` — Initialize memory system
+- `/moss-mem start -d "描述" -n "下一步指令"` — Start new task
+- `/moss-mem update -d "进度" -s "🔧"` — Update task progress
+- `/moss-mem complete -d "完成描述"` — Complete current task
+- `/moss-mem add-note -n "笔记内容"` — Add note to scratchpad
 
 ## Architecture
 
 ```
 morrow_skills/
-├── moss_mem/           # Skill definition
+├── moss-mem/           # Skill definition
 │   ├── SKILL.md         # Skill documentation
 │   └── scripts/         # Python scripts for skill logic
 ├── MEMORY_TASKS/        # Task files directory
@@ -36,7 +36,7 @@ morrow_skills/
 
 ## Project State Protocol
 
-`MEMORY.md` is the source of truth for project state. All significant work should update it via moss_mem commands to maintain continuity across sessions.
+`MEMORY.md` is the source of truth for project state. All significant work should update it via moss-mem commands to maintain continuity across sessions.
 
 ## Development Notes
 
