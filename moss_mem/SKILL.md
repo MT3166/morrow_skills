@@ -1,5 +1,5 @@
 ---
-name: MOSS_MEM
+name: moss_mem
 description: "Project memory management skill for persistent context across sessions. Manages MEMORY.md and MEMORY_TASKS/ directory. Use when: (1) initializing a new project with memory system, (2) updating task progress with action=update, (3) starting a new task with action=start, (4) completing a task with action=complete, (5) adding notes to scratchpad with action=add_note, (6) reading MEMORY.md to understand current project state. Trigger phrases: update memory, start task, complete task, add note, initialize memory, check memory."
 ---
 
@@ -18,7 +18,7 @@ Manages persistent context for projects via `MEMORY.md` and `MEMORY_TASKS/` dire
 
 ## Commands
 
-All commands use `python3 /Users/mt/.claude/skills/MOSS_MEM/scripts/memory_manager.py <command> [args]`
+All commands use `python3 /Users/mt/.claude/skills/moss_mem/scripts/memory_manager.py <command> [args]`
 
 ### init
 Initialize memory system in current project:
