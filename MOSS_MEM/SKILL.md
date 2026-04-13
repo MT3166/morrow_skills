@@ -1,6 +1,6 @@
 ---
 name: MOSS_MEM
-description: Project memory management skill for persistent context across sessions. Manages MEMORY.md and MEMORY_TASKS/ directory. Use when: (1) initializing a new project with memory system, (2) updating task progress with action=update, (3) starting a new task with action=start, (4) completing a task with action=complete, (5) adding notes to scratchpad with action=add_note, (6) reading MEMORY.md to understand current project state. Trigger phrases: "update memory", "start task", "complete task", "add note", "initialize memory", "check memory".
+description: "Project memory management skill for persistent context across sessions. Manages MEMORY.md and MEMORY_TASKS/ directory. Use when: (1) initializing a new project with memory system, (2) updating task progress with action=update, (3) starting a new task with action=start, (4) completing a task with action=complete, (5) adding notes to scratchpad with action=add_note, (6) reading MEMORY.md to understand current project state. Trigger phrases: update memory, start task, complete task, add note, initialize memory, check memory."
 ---
 
 # MOSS_MEM - Project Memory Management
