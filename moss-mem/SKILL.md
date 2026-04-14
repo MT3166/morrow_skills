@@ -1,6 +1,15 @@
 ---
 name: moss-mem
-description: "Project memory management skill for persistent context across sessions. Manages MEMORY.md and MEMORY_TASKS/ directory. Use when: (1) initializing a new project with memory system, (2) updating task progress with action=update, (3) starting a new task with action=start, (4) completing a task with action=complete, (5) adding notes to scratchpad with action=add_note, (6) reading MEMORY.md to understand current project state. Trigger phrases: update memory, start task, complete task, add note, initialize memory, check memory."
+description: |
+  Project memory management. Triggers:
+  - initialize memory, init memory, 新项目初始化记忆
+  - start task, new task, begin task, 开始任务
+  - update memory, update task, 进度更新, 更新记忆
+  - complete task, finish task, 完成任务
+  - add note, scratchpad, 笔记, 添加备注
+  - check memory, read memory, 查看记忆, 当前状态
+  - show task, show memory, 查看任务, 查看交接状态
+  - handoff, 交接, 接力, context switch
 ---
 
 # moss-mem - Project Memory Management
@@ -18,41 +27,65 @@ Manages persistent context for projects via `MEMORY.md` and `MEMORY_TASKS/` dire
 
 ## Commands
 
-All commands use `python3 /Users/mt/.claude/skills/moss-mem/scripts/memory_manager.py <command> [args]`
+All commands run from **project root** (where MEMORY.md lives):
+```
+python3 /path/to/memory_manager.py <command> [args]
+```
+
+> **Path note**: When installed as a Claude Code skill, the script is at the skill install root. When developing locally, run from repo root. Adjust path as needed for your setup.
 
 ### init
 Initialize memory system in current project:
 ```
-python3 .../memory_manager.py init
+python3 /path/to/memory_manager.py init
 ```
 Creates `MEMORY.md` (if missing) and `MEMORY_TASKS/` directory.
 
 ### start
 Start a new task:
 ```
-python3 .../memory_manager.py start -d "Description" -n "Next step instruction"
+python3 /path/to/memory_manager.py start -d "Description" -n "Next step instruction"
 ```
 Creates `MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md` and updates pointer in MEMORY.md.
 
 ### update
 Update current task progress:
 ```
-python3 .../memory_manager.py update -d "Progress description" -n "Next step" -s "🔧"
+python3 /path/to/memory_manager.py update -d "Progress description" -n "Next step" -s "🔧"
 ```
 Updates MEMORY.md meta, status, next step, and scratchpad.
+
+For agent handoff, also pass handoff fields:
+```
+python3 /path/to/memory_manager.py update \
+  -d "Completed auth refactor" \
+  -n "Test the login flow" -s "🔧" \
+  -l "Refactored auth.py:login() — moved token validation to separate function" \
+  -k "JWT stored in httpOnly cookie, not localStorage — do not revert" \
+  -m "auth.py:45-60 is untested, do not modify until tests added"
+```
+> **Empty string (`""`) semantics**: passing `-m ""` (empty string) clears the placeholder and writes `<!-- none -->` instead. Omitting the flag (`-m` not present) leaves the field unchanged.
 
 ### complete
 Complete current task:
 ```
-python3 .../memory_manager.py complete -d "Completion description"
+python3 /path/to/memory_manager.py complete -d "Completion description"
 ```
 Archives task file, updates MEMORY_ARCHIVE.md, resets status to ✅.
 
 ### add-note
 Add free-form note to scratchpad:
 ```
-python3 .../memory_manager.py add-note -n "Note content"
+python3 /path/to/memory_manager.py add-note -n "Note content"
 ```
+
+### show
+Show current task file content (for handoff review):
+```
+python3 /path/to/memory_manager.py show
+python3 /path/to/memory_manager.py show --file MEMORY_TASKS/20260413-120000_task.md
+```
+Reads `MEMORY.md` → extracts `**当前指针**` → prints task file. Use `--file` to show a specific task file (e.g., an archived or stale task).
 
 ## Status Emoji Convention
 
@@ -67,7 +100,42 @@ python3 .../memory_manager.py add-note -n "Note content"
 
 When user requests memory operations, invoke the appropriate command. After each operation, report the result to user and append `📝 MEMORY 已更新` to your response.
 
-## MEMORY.md Format
+## Task File Format (MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md)
+
+```
+## Description       ← 任务目标
+## Next Step         ← 下一步精确指令
+## Status            ← 🔧 进行中 | ✅ 完成 | ❌ 阻塞
+## Last Action       ← 本次完成的具体操作，精确到函数/行
+## Key Decisions     ← 重大决策及原因，后续 Agent 遵守不推翻
+## Landmines         ← 已知的坑或危险区域，勿动
+## Created           ← ISO timestamp
+```
+
+## Agent Handoff Protocol
+
+When handing off to another agent (session end or context switch):
+
+1. **Update Last Action** — Fill in `## Last Action` with concrete changes made (file:line, function name, what changed)
+2. **Record Key Decisions** — If any architectural choices were made, note the decision and rationale in `## Key Decisions`
+3. **Flag Landmines** — If any code areas are fragile or known issues, document them in `## Landmines`
+4. **Update Next Step** — Ensure `## Next Step` is precise and actionable for the next agent
+5. **Call `moss-mem complete`** — Archive the task so the next agent can start fresh
+
+A well-prepared task file lets the next agent achieve full context in under 30 seconds.
+
+### Interrupt Recovery (Agent was killed mid-session)
+
+If the previous agent was killed without completing the handoff:
+
+1. **Inspect task file** → `python3 moss-mem/scripts/memory_manager.py show`
+2. If `## Last Action` is empty or `## Next Step` is unclear:
+   - Run `git diff HEAD` to see uncommitted changes (what was being done)
+   - Run `git log --oneline -5` to see recent commits (context of recent work)
+   - Run `git stash list` to check for any stashed changes
+3. Fill in `## Last Action`, `## Landmines` based on code state and git diff
+4. Continue from `## Next Step`; do not restart from scratch
+5. After recovery: `moss-mem complete -d "recovered: <summary>"` → `moss-mem start -d "..." -n "..."`
 
 ```
 # MEMORY.md
@@ -112,5 +180,7 @@ When user requests memory operations, invoke the appropriate command. After each
 ## Script Location
 
 ```
-/Users/mt/.claude/skills/moss-mem/scripts/memory_manager.py
+/path/to/memory_manager.py
 ```
+
+The script auto-detects its own location via `Path(__file__).resolve().parent`. To invoke from any directory, either use an absolute path or add the script's directory to `PATH`.

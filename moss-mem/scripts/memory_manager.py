@@ -17,6 +17,11 @@ MEMORY_FILE = "MEMORY.md"
 TASKS_DIR = "MEMORY_TASKS"
 ARCHIVE_FILE = "MEMORY_ARCHIVE.md"
 
+# Auto-detect script location so callers don't need absolute paths
+SCRIPT_DIR = Path(__file__).resolve().parent
+# To invoke from anywhere, use: python3 "$(python3 -c "import os; print(os.path.dirname(os.path.abspath('~/.claude/skills/moss-mem/scripts/memory_manager.py'))))/memory_manager.py" <command>
+# Or add to PATH: export PATH="$PATH:$HOME/.claude/skills/moss-mem/scripts"
+
 
 def get_timestamp():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -236,6 +241,9 @@ def cmd_start(description: str, next_step: str):
             f.write(f"## Description\n{description}\n\n")
             f.write(f"## Next Step\n{next_step}\n\n")
             f.write(f"## Status\n🔧 In Progress\n\n")
+            f.write(f"## Last Action\n<!-- 本次完成的具体操作，精确到函数/行 -->\n\n")
+            f.write(f"## Key Decisions\n<!-- 重大决策及原因，后续 Agent 遵守不推翻 -->\n\n")
+            f.write(f"## Landmines\n<!-- 已知的坑或危险区域，勿动 -->\n\n")
             f.write(f"## Created\n{datetime.now().isoformat()}\n\n")
 
         _memory_update({
@@ -252,7 +260,8 @@ def cmd_start(description: str, next_step: str):
         release_lock()
 
 
-def cmd_update(description: str, next_step: str, status: str):
+def cmd_update(description: str, next_step: str, status: str,
+               last_action: str = None, key_decisions: str = None, landmines: str = None):
     """Update current task progress in MEMORY.md."""
     if check_concurrent_edit():
         print("[ERROR] Cannot update while another edit is in progress.")
@@ -268,6 +277,12 @@ def cmd_update(description: str, next_step: str, status: str):
             "next_step": next_step,
             "scratchpad_notes": [description],
         })
+
+        # Write to task file if any handoff fields are provided
+        if last_action or key_decisions or landmines:
+            task_file = get_current_task_file()
+            if task_file and Path(task_file).exists():
+                _update_task_file(task_file, last_action, key_decisions, landmines)
 
         print(f"✅ MEMORY.md updated")
         print(f"📊 Status: {status}")
@@ -322,6 +337,30 @@ def cmd_add_note(note: str):
         release_lock()
 
 
+def cmd_show(task_file: str = None):
+    """Print task file to stdout for handoff review. Uses current task or --file."""
+    if not task_file:
+        task_file = get_current_task_file()
+    if not task_file:
+        print("[ERROR] No task file specified and no current pointer found in MEMORY.md")
+        sys.exit(1)
+    if not Path(task_file).exists():
+        print(f"[ERROR] Task file not found: {task_file}")
+        sys.exit(1)
+    with open(task_file) as f:
+        content = f.read()
+    # Strip frontmatter for cleaner output
+    lines = content.split("\n")
+    if lines and lines[0] == "---":
+        skip = 0
+        for i, l in enumerate(lines[1:], 1):
+            if l == "---":
+                skip = i + 1
+                break
+        lines = lines[skip:]
+    print("\n".join(lines))
+
+
 # ---------------------------------------------------------------------------
 # Task file utilities
 # ---------------------------------------------------------------------------
@@ -335,14 +374,76 @@ def get_current_task_file():
         content = f.read()
         for line in content.split("\n"):
             if "**当前指针**" in line:
+                # Try backtick extraction first (highest priority)
                 if "`" in line:
                     start = line.find("`") + 1
                     end = line.rfind("`")
                     return line[start:end] if end > start else None
-                parts = line.split("：")
-                if len(parts) > 1:
-                    return parts[-1].strip()
+                # Fallback: split by either Chinese or English colon
+                for sep in ("：", ":"):
+                    if sep in line:
+                        parts = line.split(sep)
+                        if len(parts) > 1:
+                            return parts[-1].strip()
     return None
+
+
+def _update_task_file(task_file: str, last_action: str = None,
+                      key_decisions: str = None, landmines: str = None):
+    """Update handoff fields in the current task file.
+
+    None = don't update, "" = clear placeholder, "content" = replace.
+    """
+    if not Path(task_file).exists():
+        raise FileNotFoundError(f"Task file not found: {task_file}")
+
+    with open(task_file) as f:
+        content = f.read()
+
+    lines = content.split("\n")
+    output = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # last_action
+        if line.strip().startswith("## Last Action"):
+            output.append(line)
+            i += 1
+            while i < len(lines) and not lines[i].startswith("## ") and not lines[i].startswith("---"):
+                i += 1
+            if last_action is not None:
+                output.append(last_action if last_action else "<!-- pending -->")
+            continue
+        # key_decisions
+        if line.strip().startswith("## Key Decisions"):
+            output.append(line)
+            i += 1
+            while i < len(lines) and not lines[i].startswith("## ") and not lines[i].startswith("---"):
+                i += 1
+            if key_decisions is not None:
+                output.append(key_decisions if key_decisions else "<!-- pending -->")
+            continue
+        # landmines
+        if line.strip().startswith("## Landmines"):
+            output.append(line)
+            i += 1
+            while i < len(lines) and not lines[i].startswith("## ") and not lines[i].startswith("---"):
+                i += 1
+            if landmines is not None:
+                output.append(landmines if landmines else "<!-- none -->")
+            continue
+        output.append(line)
+        i += 1
+
+    written = "\n".join(output)
+    with open(task_file, "w") as f:
+        f.write(written)
+
+    # Verify write succeeded by reading back
+    with open(task_file) as f:
+        verified = f.read()
+    if verified != written:
+        raise RuntimeError(f"Write verification failed for {task_file}")
 
 
 def _archive_task(task_file: str):
@@ -460,12 +561,18 @@ def main():
     update_parser.add_argument("--description", "-d", required=True, help="Progress description")
     update_parser.add_argument("--next-step", "-n", required=True, help="Next step instruction")
     update_parser.add_argument("--status", "-s", required=True, help="Status emoji")
+    update_parser.add_argument("--last-action", "-l", default=None, help="Last action (writes to task file)")
+    update_parser.add_argument("--key-decisions", "-k", default=None, help="Key decisions (writes to task file)")
+    update_parser.add_argument("--landmines", "-m", default=None, help="Landmines (writes to task file)")
 
     complete_parser = subparsers.add_parser("complete", help="Complete current task")
     complete_parser.add_argument("--description", "-d", required=True, help="Completion description")
 
     note_parser = subparsers.add_parser("add-note", help="Add note to scratchpad")
     note_parser.add_argument("--note", "-n", required=True, help="Note content")
+
+    show_parser = subparsers.add_parser("show", help="Show current task file (for handoff review)")
+    show_parser.add_argument("--file", "-f", default=None, help="Specific task file to show (default: current pointer)")
 
     args = parser.parse_args()
 
@@ -474,11 +581,16 @@ def main():
     elif args.command == "start":
         cmd_start(args.description, args.next_step)
     elif args.command == "update":
-        cmd_update(args.description, args.next_step, args.status)
+        cmd_update(args.description, args.next_step, args.status,
+                getattr(args, 'last_action', None),
+                getattr(args, 'key_decisions', None),
+                getattr(args, 'landmines', None))
     elif args.command == "complete":
         cmd_complete(args.description)
     elif args.command == "add-note":
         cmd_add_note(args.note)
+    elif args.command == "show":
+        cmd_show(getattr(args, 'file', None))
     else:
         parser.print_help()
         sys.exit(1)
