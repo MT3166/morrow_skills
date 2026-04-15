@@ -361,6 +361,128 @@ def cmd_show(task_file: str = None):
     print("\n".join(lines))
 
 
+def cmd_recover():
+    """Automated interrupt recovery: inspect git state and guide task file reconstruction."""
+    print("=== Interrupt Recovery ===")
+
+    # Check lock file first
+    lock_file = Path(TASKS_DIR) / ".edit_lock"
+    if lock_file.exists():
+        print(f"⚠️  Lock file exists: {lock_file}")
+        print("   If the previous process was killed, delete it with:")
+        print(f"   rm {lock_file}")
+        print()
+
+    # Check current task
+    task_file = get_current_task_file()
+    if task_file:
+        print(f"Current task pointer: {task_file}")
+        if Path(task_file).exists():
+            print("Task file exists.")
+            with open(task_file) as f:
+                content = f.read()
+            # Check if Last Action is empty
+            if "## Last Action" in content:
+                la_start = content.find("## Last Action")
+                la_end = content.find("## ", la_start + 1)
+                la_section = content[la_start:la_end] if la_end > 0 else content[la_start:]
+                if "<!--" in la_section and "-->" in la_section:
+                    print("⚠️  ## Last Action is empty (pending). Fill it before continuing.")
+            else:
+                print("⚠️  Task file has no ## Last Action section.")
+        else:
+            print(f"⚠️  Task file not found: {task_file} (stale pointer)")
+    else:
+        print("No current task pointer found.")
+
+    print()
+    print("=== Git State ===")
+
+    # Run git commands to gather context
+    import subprocess
+
+    try:
+        result = subprocess.run(["git", "diff", "HEAD", "--stat"],
+                              capture_output=True, text=True, timeout=10)
+        if result.stdout.strip():
+            print("Uncommitted changes:")
+            print(result.stdout)
+        else:
+            print("No uncommitted changes.")
+    except Exception as e:
+        print(f"(git diff unavailable: {e})")
+
+    try:
+        result = subprocess.run(["git", "log", "--oneline", "-5"],
+                              capture_output=True, text=True, timeout=10)
+        if result.stdout.strip():
+            print("Recent commits:")
+            print(result.stdout)
+    except Exception as e:
+        print(f"(git log unavailable: {e})")
+
+    try:
+        result = subprocess.run(["git", "stash", "list"],
+                              capture_output=True, text=True, timeout=10)
+        if result.stdout.strip():
+            print("Stashed changes:")
+            print(result.stdout)
+    except Exception as e:
+        print(f"(git stash unavailable: {e})")
+
+    print()
+    print("After reviewing git state, run:")
+    print("  moss-mem update -d 'recovered context' -n '<next step>' -s '🔧'")
+    print("to fill in the task file with recovery information.")
+
+
+def cmd_check(task_file: str = None):
+    """Validate task file completeness. Exit 0 if complete, 1 if incomplete."""
+    if not task_file:
+        task_file = get_current_task_file()
+    if not task_file:
+        print("[ERROR] No task file specified and no current pointer found.")
+        sys.exit(1)
+    if not Path(task_file).exists():
+        print(f"[ERROR] Task file not found: {task_file}")
+        sys.exit(1)
+
+    with open(task_file) as f:
+        content = f.read()
+
+    issues = []
+    # Check Last Action
+    if "## Last Action" in content:
+        la_start = content.find("## Last Action")
+        la_end = content.find("## ", la_start + 1)
+        la_section = content[la_start:la_end] if la_end > 0 else content[la_start:]
+        if "<!--" in la_section and "-->" in la_section and "pending" in la_section.lower():
+            issues.append("## Last Action is still <!-- pending -->")
+    # Check Key Decisions
+    if "## Key Decisions" in content:
+        kd_start = content.find("## Key Decisions")
+        kd_end = content.find("## ", kd_start + 1)
+        kd_section = content[kd_start:kd_end] if kd_end > 0 else content[kd_start:]
+        if "<!--" in kd_section and "-->" in kd_section and "none" in kd_section.lower():
+            issues.append("## Key Decisions is still <!-- none -->")
+    # Check Landmines
+    if "## Landmines" in content:
+        lm_start = content.find("## Landmines")
+        lm_end = content.find("## ", lm_start + 1)
+        lm_section = content[lm_start:lm_end] if lm_end > 0 else content[lm_start:]
+        if "<!--" in lm_section and "-->" in lm_section and "none" in lm_section.lower():
+            issues.append("## Landmines is still <!-- none -->")
+
+    if issues:
+        print("⚠️  Task file incomplete:")
+        for issue in issues:
+            print(f"  - {issue}")
+        sys.exit(1)
+    else:
+        print("✅ Task file is complete.")
+        sys.exit(0)
+
+
 # ---------------------------------------------------------------------------
 # Task file utilities
 # ---------------------------------------------------------------------------
@@ -574,6 +696,13 @@ def main():
     show_parser = subparsers.add_parser("show", help="Show current task file (for handoff review)")
     show_parser.add_argument("--file", "-f", default=None, help="Specific task file to show (default: current pointer)")
 
+    subparsers.add_parser("recover", help="Automated interrupt recovery")
+
+    check_parser = subparsers.add_parser("check", help="Validate task file completeness")
+    check_parser.add_argument("--file", "-f", default=None, help="Specific task file to check (default: current pointer)")
+
+    args = parser.parse_args()
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -591,6 +720,10 @@ def main():
         cmd_add_note(args.note)
     elif args.command == "show":
         cmd_show(getattr(args, 'file', None))
+    elif args.command == "recover":
+        cmd_recover()
+    elif args.command == "check":
+        cmd_check(getattr(args, 'file', None))
     else:
         parser.print_help()
         sys.exit(1)
