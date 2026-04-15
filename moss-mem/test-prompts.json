@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "prompt": "开始一个新任务：实现登录功能，下一步是写auth.py",
+    "expected": "调用 moss-mem start 命令创建任务文件并更新 MEMORY.md",
+    "type": "start_task"
+  },
+  {
+    "id": 2,
+    "prompt": "更新任务进度：已完成auth.py重构，下一步是测试登录，状态进行中",
+    "expected": "调用 moss-mem update 命令更新 MEMORY.md 和任务文件",
+    "type": "update_task"
+  },
+  {
+    "id": 3,
+    "prompt": "查看当前任务状态",
+    "expected": "调用 moss-mem show 命令读取并展示当前任务文件内容",
+    "type": "show_task"
+  }
+]

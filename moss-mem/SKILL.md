@@ -1,15 +1,38 @@
 ---
 name: moss-mem
-description: |
-  Project memory management. Triggers:
-  - initialize memory, init memory, 新项目初始化记忆
-  - start task, new task, begin task, 开始任务
-  - update memory, update task, 进度更新, 更新记忆
-  - complete task, finish task, 完成任务
-  - add note, scratchpad, 笔记, 添加备注
-  - check memory, read memory, 查看记忆, 当前状态
-  - show task, show memory, 查看任务, 查看交接状态
-  - handoff, 交接, 接力, context switch
+description: "Project memory management for Claude Code sessions. Triggers: initialize memory, start/update/complete task, add note, show task, handoff/context switch."
+triggers:
+  - initialize memory
+  - init memory
+  - 新项目初始化记忆
+  - start task
+  - new task
+  - begin task
+  - 开始任务
+  - update memory
+  - update task
+  - 进度更新
+  - 更新记忆
+  - complete task
+  - finish task
+  - 完成任务
+  - add note
+  - scratchpad
+  - 笔记
+  - add note
+  - check memory
+  - read memory
+  - 查看记忆
+  - 当前状态
+  - show task
+  - show memory
+  - 查看任务
+  - 查看交接状态
+  - handoff
+  - 交接
+  - 接力
+  - context switch
+version: "1.0"
 ---
 
 # moss-mem - Project Memory Management
@@ -64,7 +87,15 @@ python3 /path/to/memory_manager.py update \
   -k "JWT stored in httpOnly cookie, not localStorage — do not revert" \
   -m "auth.py:45-60 is untested, do not modify until tests added"
 ```
-> **Empty string (`""`) semantics**: passing `-m ""` (empty string) clears the placeholder and writes `<!-- none -->` instead. Omitting the flag (`-m` not present) leaves the field unchanged.
+
+**Field semantics for handoff flags (`-l`, `-k`, `-m`)**:
+| Flag | Omitted (not present) | Empty string `""` | Non-empty value |
+|------|----------------------|-------------------|-----------------|
+| `-l` | Leave unchanged | Clear to `<!-- pending -->` | Replace with value |
+| `-k` | Leave unchanged | Clear to `<!-- none -->` | Replace with value |
+| `-m` | Leave unchanged | Write `<!-- none -->` | Replace with value |
+
+**Task expiration**: Tasks not updated for >7 days are considered stale. Run `moss-mem recover` to inspect and either complete or restart the task.
 
 ### complete
 Complete current task:
@@ -86,6 +117,20 @@ python3 /path/to/memory_manager.py show
 python3 /path/to/memory_manager.py show --file MEMORY_TASKS/20260413-120000_task.md
 ```
 Reads `MEMORY.md` → extracts `**当前指针**` → prints task file. Use `--file` to show a specific task file (e.g., an archived or stale task).
+
+### recover
+Automated interrupt recovery — inspects git state and guide task file reconstruction:
+```
+python3 /path/to/memory_manager.py recover
+```
+Steps: (1) check lock file, (2) inspect current task file, (3) `git diff HEAD` → uncommitted changes, (4) `git log --oneline -5` → recent commits, (5) `git stash list` → stashed changes. Run `moss-mem update` to fill in recovery information.
+
+### check
+Validate current task file completeness — ensure all required fields are filled before handoff:
+```
+python3 /path/to/memory_manager.py check
+```
+Exits 0 if task file is complete (all fields non-empty/non-placeholder). Exits 1 if any field is still `<!-- pending -->` or `<!-- none -->`. Use before `moss-mem complete` to guarantee clean handoff.
 
 ## Status Emoji Convention
 
@@ -163,6 +208,12 @@ If the previous agent was killed without completing the handoff:
 ## 已归档任务 [Strict/Append-only]
 - [YYYY-MM-DD] [task summary]
 ```
+
+## Prerequisites
+
+- Python 3.8+
+- No external dependencies (stdlib only)
+- `MEMORY_TASKS/.edit_lock` must be removed manually after `kill -9` (see Error Handling)
 
 ## Error Handling
 
