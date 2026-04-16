@@ -134,8 +134,8 @@ python3 /path/to/memory_manager.py check --fix
 - Default: exits 0 if complete, exits 1 if any field is `<!-- pending -->` or `<!-- none -->`
 - `--fix`: auto-fill empty fields using git-derived content:
   - `## Last Action` ← git diff summary (uncommitted changes)
-  - `## Landmines` ← recent git log (commit context)
-  - `## Key Decisions` ← cannot auto-fill (requires human judgment)
+  - `## Landmines` ← new directories + recent git log
+  - `## Key Decisions` ← newly created directories (architectural signals)
 Use before `moss-mem complete` to guarantee clean handoff.
 
 ## Status Emoji Convention
