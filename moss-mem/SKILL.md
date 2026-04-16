@@ -88,30 +88,31 @@ MEMORY_TASKS/MEMORY_ARCHIVE.md    ← completed task log
 - Python 3.8+ (stdlib only — no external dependencies)
 - Run from **project root** (where MEMORY.md lives)
 - After `kill -9`: `rm MEMORY_TASKS/.edit_lock` before next operation
+- **Script path**: when invoked as a skill, the script is at `{base_dir}/scripts/memory_manager.py` — `{base_dir}` is the value on the `Base directory for this skill:` line in the skill invocation header (e.g. `/Users/you/.claude/skills/moss-mem`). All command examples below use this path.
 
 ## Commands
 
 ### init
 ```
-python3 /path/to/memory_manager.py init
+python3 {base_dir}/scripts/memory_manager.py init
 ```
 Creates `MEMORY.md` (if missing) and `MEMORY_TASKS/` directory with `MEMORY_ARCHIVE.md`.
 
 ### start
 ```
-python3 /path/to/memory_manager.py start -d "Description" -n "Next step instruction"
+python3 {base_dir}/scripts/memory_manager.py start -d "Description" -n "Next step instruction"
 ```
 Creates `MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md` and updates pointer in MEMORY.md. Status → 🔧.
 
 ### update
 ```
-python3 /path/to/memory_manager.py update -d "Progress" -n "Next step" -s "🔧"
+python3 {base_dir}/scripts/memory_manager.py update -d "Progress" -n "Next step" -s "🔧"
 ```
 Updates MEMORY.md (status, next step, scratchpad entry with timestamp).
 
 **Agent handoff fields** (all optional):
 ```
-python3 /path/to/memory_manager.py update \
+python3 {base_dir}/scripts/memory_manager.py update \
   -d "Completed auth refactor" \
   -n "Test the login flow" -s "🔧" \
   -l "Refactored auth.py:login() — moved token validation to separate function" \
@@ -131,33 +132,33 @@ python3 /path/to/memory_manager.py update \
 
 ### complete
 ```
-python3 /path/to/memory_manager.py complete -d "Completion description"
+python3 {base_dir}/scripts/memory_manager.py complete -d "Completion description"
 ```
 Archives task file → `MEMORY_TASKS/archive/`, appends to `MEMORY_ARCHIVE.md`, resets status → ✅.
 
 ### add-note
 ```
-python3 /path/to/memory_manager.py add-note -n "Note content"
+python3 {base_dir}/scripts/memory_manager.py add-note -n "Note content"
 ```
 Appends timestamped note to scratchpad section.
 
 ### show
 ```
-python3 /path/to/memory_manager.py show
-python3 /path/to/memory_manager.py show --file MEMORY_TASKS/20260413-120000_task.md
+python3 {base_dir}/scripts/memory_manager.py show
+python3 {base_dir}/scripts/memory_manager.py show --file MEMORY_TASKS/20260413-120000_task.md
 ```
 Reads pointer from MEMORY.md → prints task file. Use `--file` for archived or stale tasks.
 
 ### recover
 ```
-python3 /path/to/memory_manager.py recover
+python3 {base_dir}/scripts/memory_manager.py recover
 ```
 Automated interrupt recovery. Checks: (1) lock file → (2) task file completeness → (3) `git diff HEAD` → (4) `git log --oneline -5` → (5) `git stash list`. Guides next action.
 
 ### check
 ```
-python3 /path/to/memory_manager.py check
-python3 /path/to/memory_manager.py check --fix
+python3 {base_dir}/scripts/memory_manager.py check
+python3 {base_dir}/scripts/memory_manager.py check --fix
 ```
 - `check` alone: exit 0 if all handoff fields filled, exit 1 if any `<!-- pending -->` or `<!-- none -->`
 - `check --fix`: auto-fill from git state:
