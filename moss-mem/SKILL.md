@@ -19,7 +19,6 @@ triggers:
   - add note
   - scratchpad
   - 笔记
-  - add note
   - check memory
   - read memory
   - 查看记忆
@@ -32,53 +31,85 @@ triggers:
   - 交接
   - 接力
   - context switch
-version: "1.0"
+version: "1.1"
 ---
 
 # moss-mem - Project Memory Management
 
-## Overview
+## TL;DR
 
-Manages persistent context for projects via `MEMORY.md` and `MEMORY_TASKS/` directory. Ensures continuity across Claude sessions by tracking project state, active tasks, and technical conventions.
+Manages project memory via `MEMORY.md` (single source of truth) + `MEMORY_TASKS/` (detailed task files). Ensures zero-loss handoff between Claude sessions.
 
-## Core Concepts
+## Quick Reference
 
-- **MEMORY.md**: Single source of truth for project state (strict format, <80 lines)
-- **MEMORY_TASKS/**: Timestamped task files for detailed progress tracking
-- **MEMORY_ARCHIVE.md**: Completed tasks archive
-- **Concurrency control**: `.edit_lock` file prevents simultaneous modifications
+| Command | Purpose | Key Flags |
+|---------|---------|-----------|
+| `init` | Initialize memory system | - |
+| `start -d "..." -n "..."` | Start new task | `-d` description, `-n` next step |
+| `update -d "..." -n "..." -s "🔧"` | Update progress | `-s` status emoji |
+| `update -l/-k/-m` | Agent handoff fields | `-l` last action, `-k` key decisions, `-m` landmines |
+| `complete -d "..."` | Archive and reset | `-d` completion summary |
+| `add-note -n "..."` | Scratchpad note | `-n` note content |
+| `show [--file X]` | Inspect task file | `--file` for specific/stale task |
+| `recover` | Interrupt recovery | git state inspection |
+| `check [--fix]` | Handoff validation | `--fix` auto-fill empty fields |
+
+## Architecture
+
+**Single-write principle**: All writes to MEMORY.md go through `_memory_update()` (one read → section parse → one write). Never partial writes.
+
+```
+MEMORY.md (source of truth, <80 lines)
+    ├── ## Meta [Strict]         — project identity
+    ├── ## 状态机 [Strict]        — current pointer + status
+    ├── ## 下一步指令 [Strict]    — next actionable step
+    ├── ## 暂存与备忘区 [Free]    — free-form notes
+    ├── ## 雷区与技术契约 [Strict] — append-only constraints
+    └── ## 已归档任务 [Strict]    — archive index
+
+MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md
+    ├── ## Description
+    ├── ## Next Step
+    ├── ## Status
+    ├── ## Last Action         ← filled by -l flag
+    ├── ## Key Decisions       ← filled by -k flag
+    ├── ## Landmines           ← filled by -m flag
+    └── ## Created
+
+MEMORY_TASKS/archive/              ← completed tasks
+MEMORY_TASKS/.edit_lock           ← concurrency control (O_EXCL)
+MEMORY_TASKS/MEMORY_ARCHIVE.md    ← completed task log
+```
+
+**Why timestamped task files?** Avoids filename collisions; chronological order aids debugging.
+
+## Prerequisites
+
+- Python 3.8+ (stdlib only — no external dependencies)
+- Run from **project root** (where MEMORY.md lives)
+- After `kill -9`: `rm MEMORY_TASKS/.edit_lock` before next operation
 
 ## Commands
 
-All commands run from **project root** (where MEMORY.md lives):
-```
-python3 /path/to/memory_manager.py <command> [args]
-```
-
-> **Path note**: When installed as a Claude Code skill, the script is at the skill install root. When developing locally, run from repo root. Adjust path as needed for your setup.
-
 ### init
-Initialize memory system in current project:
 ```
 python3 /path/to/memory_manager.py init
 ```
-Creates `MEMORY.md` (if missing) and `MEMORY_TASKS/` directory.
+Creates `MEMORY.md` (if missing) and `MEMORY_TASKS/` directory with `MEMORY_ARCHIVE.md`.
 
 ### start
-Start a new task:
 ```
 python3 /path/to/memory_manager.py start -d "Description" -n "Next step instruction"
 ```
-Creates `MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md` and updates pointer in MEMORY.md.
+Creates `MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md` and updates pointer in MEMORY.md. Status → 🔧.
 
 ### update
-Update current task progress:
 ```
-python3 /path/to/memory_manager.py update -d "Progress description" -n "Next step" -s "🔧"
+python3 /path/to/memory_manager.py update -d "Progress" -n "Next step" -s "🔧"
 ```
-Updates MEMORY.md meta, status, next step, and scratchpad.
+Updates MEMORY.md (status, next step, scratchpad entry with timestamp).
 
-For agent handoff, also pass handoff fields:
+**Agent handoff fields** (all optional):
 ```
 python3 /path/to/memory_manager.py update \
   -d "Completed auth refactor" \
@@ -88,156 +119,130 @@ python3 /path/to/memory_manager.py update \
   -m "auth.py:45-60 is untested, do not modify until tests added"
 ```
 
-**Field semantics for handoff flags (`-l`, `-k`, `-m`)**:
-| Flag | Omitted (not present) | Empty string `""` | Non-empty value |
-|------|----------------------|-------------------|-----------------|
-| `-l` | Leave unchanged | Clear to `<!-- pending -->` | Replace with value |
-| `-k` | Leave unchanged | Clear to `<!-- none -->` | Replace with value |
-| `-m` | Leave unchanged | Write `<!-- none -->` | Replace with value |
+**Field semantics** (`-l` / `-k` / `-m`):
 
-**Task expiration**: Tasks not updated for >7 days are considered stale. Run `moss-mem recover` to inspect and either complete or restart the task.
+| Flag | Omitted | `""` (empty) | Non-empty |
+|------|---------|--------------|-----------|
+| `-l` | Leave unchanged | → `<!-- pending -->` | Replace |
+| `-k` | Leave unchanged | → `<!-- none -->` | Replace |
+| `-m` | Leave unchanged | → `<!-- none -->` | Replace |
+
+**Task expiration**: Tasks idle >7 days are stale. Run `moss-mem recover` to assess.
 
 ### complete
-Complete current task:
 ```
 python3 /path/to/memory_manager.py complete -d "Completion description"
 ```
-Archives task file, updates MEMORY_ARCHIVE.md, resets status to ✅.
+Archives task file → `MEMORY_TASKS/archive/`, appends to `MEMORY_ARCHIVE.md`, resets status → ✅.
 
 ### add-note
-Add free-form note to scratchpad:
 ```
 python3 /path/to/memory_manager.py add-note -n "Note content"
 ```
+Appends timestamped note to scratchpad section.
 
 ### show
-Show current task file content (for handoff review):
 ```
 python3 /path/to/memory_manager.py show
 python3 /path/to/memory_manager.py show --file MEMORY_TASKS/20260413-120000_task.md
 ```
-Reads `MEMORY.md` → extracts `**当前指针**` → prints task file. Use `--file` to show a specific task file (e.g., an archived or stale task).
+Reads pointer from MEMORY.md → prints task file. Use `--file` for archived or stale tasks.
 
 ### recover
-Automated interrupt recovery — inspects git state and guide task file reconstruction:
 ```
 python3 /path/to/memory_manager.py recover
 ```
-Steps: (1) check lock file, (2) inspect current task file, (3) `git diff HEAD` → uncommitted changes, (4) `git log --oneline -5` → recent commits, (5) `git stash list` → stashed changes. Run `moss-mem update` to fill in recovery information.
+Automated interrupt recovery. Checks: (1) lock file → (2) task file completeness → (3) `git diff HEAD` → (4) `git log --oneline -5` → (5) `git stash list`. Guides next action.
 
 ### check
-Validate current task file completeness — ensure all required fields are filled before handoff:
 ```
 python3 /path/to/memory_manager.py check
 python3 /path/to/memory_manager.py check --fix
 ```
-- Default: exits 0 if complete, exits 1 if any field is `<!-- pending -->` or `<!-- none -->`
-- `--fix`: auto-fill empty fields using git-derived content:
-  - `## Last Action` ← git diff summary (uncommitted changes)
-  - `## Landmines` ← new directories + recent git log
+- `check` alone: exit 0 if all handoff fields filled, exit 1 if any `<!-- pending -->` or `<!-- none -->`
+- `check --fix`: auto-fill from git state:
+  - `## Last Action` ← git diff stat summary
   - `## Key Decisions` ← newly created directories (architectural signals)
-Use before `moss-mem complete` to guarantee clean handoff.
-
-## Status Emoji Convention
-
-| Emoji | Meaning |
-|-------|---------|
-| 🔧 | In Progress |
-| ✅ | Completed |
-| ❌ | Error/Blocked |
-| ⚠️ | Warning/Needs Attention |
-
-## Usage in Conversation
-
-When user requests memory operations, invoke the appropriate command. After each operation, report the result to user and append `📝 MEMORY 已更新` to your response.
-
-## Task File Format (MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md)
-
-```
-## Description       ← 任务目标
-## Next Step         ← 下一步精确指令
-## Status            ← 🔧 进行中 | ✅ 完成 | ❌ 阻塞
-## Last Action       ← 本次完成的具体操作，精确到函数/行
-## Key Decisions     ← 重大决策及原因，后续 Agent 遵守不推翻
-## Landmines         ← 已知的坑或危险区域，勿动
-## Created           ← ISO timestamp
-```
+  - `## Landmines` ← new directories + recent git log
+- Use before `moss-mem complete` to guarantee clean handoff.
 
 ## Agent Handoff Protocol
 
-When handing off to another agent (session end or context switch):
-
-1. **Update Last Action** — Fill in `## Last Action` with concrete changes made (file:line, function name, what changed)
-2. **Record Key Decisions** — If any architectural choices were made, note the decision and rationale in `## Key Decisions`
-3. **Flag Landmines** — If any code areas are fragile or known issues, document them in `## Landmines`
-4. **Update Next Step** — Ensure `## Next Step` is precise and actionable for the next agent
-5. **Call `moss-mem complete`** — Archive the task so the next agent can start fresh
-
-A well-prepared task file lets the next agent achieve full context in under 30 seconds.
-
-### Interrupt Recovery (Agent was killed mid-session)
-
-If the previous agent was killed without completing the handoff:
-
-1. **Inspect task file** → `python3 moss-mem/scripts/memory_manager.py show`
-2. If `## Last Action` is empty or `## Next Step` is unclear:
-   - Run `git diff HEAD` to see uncommitted changes (what was being done)
-   - Run `git log --oneline -5` to see recent commits (context of recent work)
-   - Run `git stash list` to check for any stashed changes
-3. Fill in `## Last Action`, `## Landmines` based on code state and git diff
-4. Continue from `## Next Step`; do not restart from scratch
-5. After recovery: `moss-mem complete -d "recovered: <summary>"` → `moss-mem start -d "..." -n "..."`
+**Always follow this sequence** when handing off (session end, context switch, or before `complete`):
 
 ```
+1. moss-mem check           ← verify completeness
+2. moss-mem check --fix     ← auto-fill if possible
+3. moss-mem update -l/-k/-m ← fill remaining fields manually
+4. moss-mem complete        ← archive task
+5. moss-mem start -d "..." -n "..."  ← new task for next agent
+```
+
+A complete task file enables full context recovery in <30 seconds.
+
+## Task File Format
+
+```
+## Description       ← What this task aims to achieve
+## Next Step         ← Precise next action (file:line or function name)
+## Status            ← 🔧 In Progress | ✅ Completed | ❌ Blocked
+## Last Action       ← What was just done (file:line, concrete change)
+## Key Decisions     ← Architectural choices + rationale (do not revert)
+## Landmines         ← Fragile areas, known issues, avoid unless instructed
+## Created           ← ISO timestamp
+```
+
+## MEMORY.md Template
+
+```markdown
 # MEMORY.md
 
 ## Meta [Strict]
 - 最后更新：[YYYY-MM-DD HH:MM]
-- 项目画像：[one sentence]
-- 技术栈：[stack]
+- 项目画像：[one sentence core responsibility]
+- 技术栈：[key technologies]
 
 ## 状态机 [Strict]
 - **当前指针**：`MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md`
-- **全局目标**：[current goal]
-- **最后状态**：[status emoji]
-- **最后动作**：[last action description]
+- **全局目标**：[current phase deliverable]
+- **最后状态**：[🔧|✅|❌|⚠️]
+- **最后动作**：[description of most recent action]
 
 ## 下一步指令 [Strict]
-- [动作] `path` -> [位置] 补充 [detail]
+- [action] `path` -> [location] [detail]
 
 ## 暂存与备忘区 (Scratchpad) [Free]
 <!-- notes go here -->
 
 ## 雷区与技术契约 [Strict/Append-only]
-<!-- constraints and pitfalls -->
+<!-- append-only constraints -->
 
 ## 已归档任务 [Strict/Append-only]
-- [YYYY-MM-DD] [task summary]
+- [YYYY-MM-DD] [summary]
 ```
 
-## Prerequisites
+## Troubleshooting
 
-- Python 3.8+
-- No external dependencies (stdlib only)
-- `MEMORY_TASKS/.edit_lock` must be removed manually after `kill -9` (see Error Handling)
+| Problem | Diagnosis | Fix |
+|---------|-----------|-----|
+| `MEMORY.md missing` | First run in project | `moss-mem init` auto-creates it |
+| `Concurrent edit detected` | Another process holding lock | Wait or `rm MEMORY_TASKS/.edit_lock` |
+| Lock acquisition fails | Stale lock file | `rm MEMORY_TASKS/.edit_lock` |
+| Task pointer stale | Task file moved/deleted | `moss-mem show --file X` with specific path |
+| `## Last Action` empty | Handoff not completed | `moss-mem check --fix` or fill manually |
+| Session killed mid-handoff | `kill -9` scenario | `moss-mem recover` then `moss-mem check --fix` |
+| Task idle >7 days | Stale task | `moss-mem recover` to assess + `moss-mem complete` or restart |
+| `check --fix` fails to fill Key Decisions | No new directories in git diff | Manual judgment required — mark as `<!-- none -->` |
 
-## Error Handling
+## Skill Integration
 
-| Situation | Behavior |
-|-----------|----------|
-| Concurrent edit detected | Abort with error |
-| MEMORY.md missing | Auto-create with default template |
-| Task file missing | Warn but continue (pointer may be stale) |
-| Lock acquisition fails | Exit with error code 1 |
-| SIGTERM / SIGINT received | Release lock automatically before exit |
-| Session crash (unhandled signal) | Lock released via `atexit` on next invocation (may need manual remove in rare cases) |
+- **init**: After `init skill` creates project structure, run `moss-mem init` to set up memory
+- **project-surgeon**: After surgical changes, use `moss-mem update -l/-k/-m` to document what changed
+- **Any long task**: Always start with `moss-mem start`, update with `moss-mem update`, complete with `moss-mem check` before `moss-mem complete`
 
-**Manual lock removal**: Only needed if a process was kill -9'd. Delete `MEMORY_TASKS/.edit_lock` before next operation.
+## Design Decisions
 
-## Script Location
-
-```
-/path/to/memory_manager.py
-```
-
-The script auto-detects its own location via `Path(__file__).resolve().parent`. To invoke from any directory, either use an absolute path or add the script's directory to `PATH`.
+1. **Why timestamps in task filenames?** Avoids concurrent-task name collisions; chronological order aids forensics.
+2. **Why single `_memory_update()`?** Guarantees MEMORY.md never partially written; section parse is idempotent.
+3. **Why `<!-- none -->` placeholder?** Distinguishes "intentionally empty" from "forgot to fill."
+4. **Why git integration for auto-fix?** Git is always present in code projects; diff/log provide free context for recovery.
