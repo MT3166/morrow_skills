@@ -54,6 +54,21 @@ Manages project memory via `MEMORY.md` (single source of truth) + `MEMORY_TASKS/
 | `recover` | Interrupt recovery | git state inspection |
 | `check [--fix]` | Handoff validation | `--fix` auto-fill empty fields |
 
+## Skill Invocation → Python Command Mapping
+
+When invoked via the Skill tool with `--action`-style args (e.g. from CLAUDE.md startup protocol), map to Python commands:
+
+| Skill invocation | Python command |
+|-----------------|----------------|
+| `--action init` | `python3 {base_dir}/scripts/memory_manager.py init` |
+| `--action start --description "X" --status "🔧"` | `python3 {base_dir}/scripts/memory_manager.py start -d "X" -s "🔧"` |
+| `--action start --description "X" --next "Y"` | `python3 {base_dir}/scripts/memory_manager.py start -d "X" -n "Y"` |
+| `--action update --description "X" --next "Y" --status "🔧"` | `python3 {base_dir}/scripts/memory_manager.py update -d "X" -n "Y" -s "🔧"` |
+| `--action complete --description "X"` | `python3 {base_dir}/scripts/memory_manager.py complete -d "X"` |
+| `--action add-note --note "X"` | `python3 {base_dir}/scripts/memory_manager.py add-note -n "X"` |
+
+> `-n` (next step) is required for `start` but optional for `update`. Always run from project root.
+
 ## Architecture
 
 **Single-write principle**: All writes to MEMORY.md go through `_memory_update()` (one read → section parse → one write). Never partial writes.
