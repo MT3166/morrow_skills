@@ -436,8 +436,29 @@ def cmd_recover():
     print("to fill in the task file with recovery information.")
 
 
-def cmd_check(task_file: str = None):
-    """Validate task file completeness. Exit 0 if complete, 1 if incomplete."""
+def _git_diff_summary():
+    """Get summary of uncommitted changes."""
+    try:
+        result = subprocess.run(["git", "diff", "--stat", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def _git_log_summary(n=5):
+    """Get recent commit messages."""
+    try:
+        result = subprocess.run(["git", "log", f"--oneline", f"-{n}"],
+                              capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def cmd_check(task_file: str = None, fix: bool = False):
+    """Validate task file completeness. Exit 0 if complete, 1 if incomplete.
+    With --fix: auto-fill empty fields using git-derived content."""
     if not task_file:
         task_file = get_current_task_file()
     if not task_file:
@@ -451,13 +472,25 @@ def cmd_check(task_file: str = None):
         content = f.read()
 
     issues = []
+    fix_applied = []
+
     # Check Last Action
     if "## Last Action" in content:
         la_start = content.find("## Last Action")
         la_end = content.find("## ", la_start + 1)
         la_section = content[la_start:la_end] if la_end > 0 else content[la_start:]
         if "<!--" in la_section and "-->" in la_section and "pending" in la_section.lower():
-            issues.append("## Last Action is still <!-- pending -->")
+            if fix:
+                diff = _git_diff_summary()
+                if diff:
+                    inferred = f"Uncommitted changes: {diff.split(chr(10))[0]}"
+                    content = content.replace("## Last Action\n<!-- pending -->", f"## Last Action\n{inferred}")
+                    fix_applied.append(f"## Last Action → '{inferred[:60]}...'")
+                else:
+                    issues.append("## Last Action is still <!-- pending --> (no git diff to infer from)")
+            else:
+                issues.append("## Last Action is still <!-- pending -->")
+
     # Check Key Decisions
     if "## Key Decisions" in content:
         kd_start = content.find("## Key Decisions")
@@ -465,18 +498,35 @@ def cmd_check(task_file: str = None):
         kd_section = content[kd_start:kd_end] if kd_end > 0 else content[kd_start:]
         if "<!--" in kd_section and "-->" in kd_section and "none" in kd_section.lower():
             issues.append("## Key Decisions is still <!-- none -->")
+
     # Check Landmines
     if "## Landmines" in content:
         lm_start = content.find("## Landmines")
         lm_end = content.find("## ", lm_start + 1)
         lm_section = content[lm_start:lm_end] if lm_end > 0 else content[lm_start:]
         if "<!--" in lm_section and "-->" in lm_section and "none" in lm_section.lower():
-            issues.append("## Landmines is still <!-- none -->")
+            if fix:
+                log = _git_log_summary(3)
+                if log:
+                    inferred = f"See recent commits for context:\n{log}"
+                    content = content.replace("## Landmines\n<!-- none -->", f"## Landmines\n{inferred}")
+                    fix_applied.append("## Landmines → filled from recent commits")
+                else:
+                    issues.append("## Landmines is still <!-- none --> (no git log to infer from)")
+            else:
+                issues.append("## Landmines is still <!-- none -->")
+
+    if fix_applied:
+        with open(task_file, "w") as f:
+            f.write(content)
+        print("✅ Auto-fix applied:")
+        for f_msg in fix_applied:
+            print(f"   - {f_msg}")
 
     if issues:
         print("⚠️  Task file incomplete:")
         for issue in issues:
-            print(f"  - {issue}")
+            print(f"   - {issue}")
         sys.exit(1)
     else:
         print("✅ Task file is complete.")
@@ -700,6 +750,7 @@ def main():
 
     check_parser = subparsers.add_parser("check", help="Validate task file completeness")
     check_parser.add_argument("--file", "-f", default=None, help="Specific task file to check (default: current pointer)")
+    check_parser.add_argument("--fix", action="store_true", help="Auto-fill empty fields with git-derived content")
 
     args = parser.parse_args()
 
@@ -723,7 +774,7 @@ def main():
     elif args.command == "recover":
         cmd_recover()
     elif args.command == "check":
-        cmd_check(getattr(args, 'file', None))
+        cmd_check(getattr(args, 'file', None), getattr(args, 'fix', False))
     else:
         parser.print_help()
         sys.exit(1)
