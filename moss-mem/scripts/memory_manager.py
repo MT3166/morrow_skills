@@ -456,6 +456,19 @@ def _git_log_summary(n=5):
         return None
 
 
+def _git_new_dirs():
+    """Detect newly created directories from git diff (heuristic for architectural decisions)."""
+    try:
+        result = subprocess.run(["git", "diff", "--name-status", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+        new_dirs = [l.split("\t")[1].rsplit("/", 1)[0] for l in lines
+                   if l.startswith("A") and "/" in l.split("\t")[1]]
+        return list(set(new_dirs)) if new_dirs else None
+    except Exception:
+        return None
+
+
 def cmd_check(task_file: str = None, fix: bool = False):
     """Validate task file completeness. Exit 0 if complete, 1 if incomplete.
     With --fix: auto-fill empty fields using git-derived content."""
@@ -497,7 +510,16 @@ def cmd_check(task_file: str = None, fix: bool = False):
         kd_end = content.find("## ", kd_start + 1)
         kd_section = content[kd_start:kd_end] if kd_end > 0 else content[kd_start:]
         if "<!--" in kd_section and "-->" in kd_section and "none" in kd_section.lower():
-            issues.append("## Key Decisions is still <!-- none -->")
+            if fix:
+                new_dirs = _git_new_dirs()
+                if new_dirs:
+                    inferred = "Architectural decisions from uncommitted changes:\n" + "\n".join([f"- New directory created: {d}/ (review if it implies a module boundary)" for d in new_dirs[:5]])
+                    content = content.replace("## Key Decisions\n<!-- none -->", f"## Key Decisions\n{inferred}")
+                    fix_applied.append(f"## Key Decisions → inferred {len(new_dirs)} new dir(s)")
+                else:
+                    issues.append("## Key Decisions is still <!-- none --> (no architectural signals in git diff)")
+            else:
+                issues.append("## Key Decisions is still <!-- none -->")
 
     # Check Landmines
     if "## Landmines" in content:
@@ -506,13 +528,19 @@ def cmd_check(task_file: str = None, fix: bool = False):
         lm_section = content[lm_start:lm_end] if lm_end > 0 else content[lm_start:]
         if "<!--" in lm_section and "-->" in lm_section and "none" in lm_section.lower():
             if fix:
+                new_dirs = _git_new_dirs()
                 log = _git_log_summary(3)
-                if log:
-                    inferred = f"See recent commits for context:\n{log}"
+                if new_dirs or log:
+                    parts = []
+                    if new_dirs:
+                        parts.append("New/changed directories (may need attention): " + ", ".join(new_dirs[:5]))
+                    if log:
+                        parts.append(f"Recent commits:\n{log}")
+                    inferred = "\n".join(parts)
                     content = content.replace("## Landmines\n<!-- none -->", f"## Landmines\n{inferred}")
-                    fix_applied.append("## Landmines → filled from recent commits")
+                    fix_applied.append("## Landmines → filled from git state")
                 else:
-                    issues.append("## Landmines is still <!-- none --> (no git log to infer from)")
+                    issues.append("## Landmines is still <!-- none --> (no git state to infer from)")
             else:
                 issues.append("## Landmines is still <!-- none -->")
 
