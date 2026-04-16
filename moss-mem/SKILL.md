@@ -129,8 +129,14 @@ Steps: (1) check lock file, (2) inspect current task file, (3) `git diff HEAD` �
 Validate current task file completeness — ensure all required fields are filled before handoff:
 ```
 python3 /path/to/memory_manager.py check
+python3 /path/to/memory_manager.py check --fix
 ```
-Exits 0 if task file is complete (all fields non-empty/non-placeholder). Exits 1 if any field is still `<!-- pending -->` or `<!-- none -->`. Use before `moss-mem complete` to guarantee clean handoff.
+- Default: exits 0 if complete, exits 1 if any field is `<!-- pending -->` or `<!-- none -->`
+- `--fix`: auto-fill empty fields using git-derived content:
+  - `## Last Action` ← git diff summary (uncommitted changes)
+  - `## Landmines` ← recent git log (commit context)
+  - `## Key Decisions` ← cannot auto-fill (requires human judgment)
+Use before `moss-mem complete` to guarantee clean handoff.
 
 ## Status Emoji Convention
 
