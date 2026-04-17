@@ -31,13 +31,13 @@ description: |
 
 ### 核心工作流
 
-| Phase | 输入 | 工具 | 输出 |
-|-------|------|------|------|
-| **Phase 1: 需求理解** | 模糊的产品需求、用户反馈 | Impact Mapping / User Story Mapping | 清晰的用户故事、优先级排序 |
-| **Phase 2: 架构拆解** | 用户故事、业务域划分 | Conway's Law + Bounded Context + 模块化原则 | 服务边界、模块划分、架构视图 |
-| **Phase 3: 任务分解** | 服务边界、模块定义 | INVEST + MoSCoW + Story Splitting | 可执行的Task列表、 Sprint规划 |
-| **Phase 4: 团队协同** | Task列表、依赖关系 | Team Topologies + WIP Limits + ADR | 团队分工、协作接口、决策记录 |
-| **Phase 5: 持续演进** | 运行中的系统、监控数据 | 技术债务篱笆 + ADR + 演化式设计 | 重构计划、架构演进记录 |
+| Phase | 输入 | 工具 | 输出 | 决策确认点 |
+|-------|------|------|------|------------|
+| **Phase 1: 需求理解** | 模糊的产品需求、用户反馈 | Impact Mapping / User Story Mapping | 清晰的用户故事、优先级排序 | — |
+| **Phase 2: 架构拆解** | 用户故事、业务域划分 | Conway's Law + Bounded Context + 模块化原则 | 服务边界、模块划分、架构视图 | ⚠️团队重组确认点 |
+| **Phase 3: 任务分解** | 服务边界、模块定义 | INVEST + MoSCoW + Story Splitting | 可执行的Task列表、 Sprint规划 | — |
+| **Phase 4: 团队协同** | Task列表、依赖关系 | Team Topologies + WIP Limits + ADR | 团队分工、协作接口、决策记录 | ⚠️架构方案选择确认点 |
+| **Phase 5: 持续演进** | 运行中的系统、监控数据 | 技术债务篱笆 + ADR + 演化式设计 | 重构计划、架构演进记录 | 可返回Phase 2 |
 
 **流程图（含决策节点）**：
 ```
