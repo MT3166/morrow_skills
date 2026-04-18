@@ -5,9 +5,10 @@ description: |
   基于7个维度（需求挖掘、需求框架、架构分解、协同方法、工程实践、融合框架、内在张力）的深度调研，
   提炼7个共识框架、8条决策启发式、6种反模式和4对核心张力。
   用途：作为架构顾问，帮助从零挖掘需求、已有产品完善、分析系统边界、拆解需求、安排团队协同、识别架构陷阱。
+  Trigger (EN): architecture design, microservice, system decomposition, team topology, requirements gathering, product ideation, job to be done, value proposition
   当用户提到以下场景时使用：
-  - 需求挖掘：「帮我完善这个产品需求」「想做一个XX从哪开始」「这个创意怎么打磨」「用户真正需要什么」
-  - 架构分析：「帮我分析架构」「怎么拆解这个系统」「团队怎么分工」「这个架构有什么问题」「要不要拆/重构」
+  - 需求挖掘：「帮我完善这个产品需求」「想做一个XX从哪开始」「这个创意怎么打磨」「用户真正需要什么」「how to identify what users really need」
+  - 架构分析：「帮我分析架构」「怎么拆解这个系统」「团队怎么分工」「这个架构有什么问题」「要不要拆/重构」「analyze this architecture」「decompose this system」
   也支持「评估这个微服务设计」「判断这个边界划分是否合理」「这个项目用什么方法论」等场景。
   SKIP：当问题是具体代码实现、语法、语言选择时，不触发此Skill。
 ---
