@@ -434,16 +434,47 @@ Typically configured in `settings.json` as `Stop` / `PreCompact` hooks — not i
 
 ## Agent Handoff Protocol
 
+Each step has a verification gate — confirm the output before proceeding. If any gate fails, fix the issue and re-run that step. Never skip gates.
+
 ```
-1. moss-mem check           ← verify handoff fields complete
-2. moss-mem check --fix     ← auto-fill from git if possible
-3. moss-mem update -l/-k/-m ← manually fill remaining fields
-4. moss-mem diary -n "..."  ← write session diary (MCP: mempalace_diary_write, CLI: add-note [DIARY])
-5. moss-mem complete        ← archive current task
-6a. [MCP] mempalace_sync apply=true  ← prune stale palace drawers
-6b. [CLI] mempalace mine MEMORY_TASKS/ --mode convos --extract general --wing <project>  ← batch ingest
-7. moss-mem start -d "..." -n "..." ← new task for next agent
+Step 1: moss-mem check
+        Gate: exit 0 = all handoff fields filled → proceed to step 5
+              exit 1 = fields incomplete → continue to step 2
+
+Step 2: moss-mem check --fix
+        Gate: re-run moss-mem check
+              exit 0 → proceed to step 5
+              exit 1 → continue to step 3
+
+Step 3: moss-mem update -l "..." -k "..." -m "..."
+        Gate: moss-mem show — verify ## Last Action, ## Key Decisions, ## Landmines are not <!-- pending -->
+              filled → proceed to step 4
+              still pending → repeat step 3 with remaining fields
+
+Step 4: moss-mem diary -n "..."
+        Gate (MCP): draft diary entry → show user → confirm before mempalace_diary_write
+        Gate (CLI): draft [DIARY] entry → show user → confirm before add-note
+        confirmed → proceed to step 5
+
+Step 5: moss-mem complete -d "..."
+        Gate: moss-mem show --file MEMORY_TASKS/archive/<completed> — verify it was archived
+              MEMORY.md status shows ✅ → proceed to step 6
+
+Step 6a [MCP]: mempalace_sync project_dir=<project>     ← preview (no apply)
+               Show: "N stale drawers would be pruned. OK?"
+               User confirms → mempalace_sync project_dir=<project> apply=true
+               Gate: mempalace_status — verify drawer count decreased
+
+Step 6b [CLI]: mempalace mine MEMORY_TASKS/ --mode convos --extract general --wing <project>
+               Gate: mempalace search "<recent task keyword>" --wing <project>
+                     results found → proceed to step 7
+                     empty → check mine output for errors
+
+Step 7: moss-mem start -d "..." -n "..."
+        Gate: moss-mem show — verify new task file created with correct Description + Next Step
 ```
+
+**Never skip gates.** A failed gate means the previous step didn't complete — fix and retry. Step 4 (diary) and step 6a (sync apply=true) require explicit user confirmation.
 
 ## First-Time Setup
 
