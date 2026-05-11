@@ -100,9 +100,9 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   → CLI: skip
 
 "search memory" / "find tasks about X"
-  MCP:   mempalace_search query="X" wing=<project> limit=10 → semantic, ranked
-  CLI:   mempalace search "X" --wing <project>              → vector, ranked
-  File:  grep -r "X" MEMORY_TASKS/                           → exact match only
+  MCP:   mempalace_search query="X" wing=<project> limit=10   → semantic (cosine)
+  CLI:   mempalace search "X" --wing <project>                → hybrid (cosine + BM25)
+  File:  grep -r "X" MEMORY_TASKS/                             → exact match only
 
 "link X to Y"
   MCP:   mempalace_kg_add + mempalace_create_tunnel
@@ -165,7 +165,7 @@ In enhanced and cli-fallback modes, `mempalace instructions help` provides a cur
 | Mode | Search | KG | Diary | Mirroring | Context Recovery |
 |------|--------|----|-------|-----------|-----------------|
 | **enhanced** (MCP) | semantic | temporal graph | AAAK entries | real-time | multi-tool orchestration |
-| **cli-fallback** | vector (CLI) | via extract general | scratchpad notes | batched (mine) | wake-up snapshot |
+| **cli-fallback** | hybrid (cosine+BM25, CLI) | via extract general | scratchpad notes | batched (mine) | wake-up snapshot |
 | **file-only** | grep | manual annotation | add-note [DIARY] | none | grep |
 
 ## Operations
@@ -231,8 +231,9 @@ Enhanced (MCP): `mempalace_update_drawer` (mark complete) → `mempalace_sync pr
 
 ## MCP Operations (primary path)
 
-### search — Semantic search
+### search — Hybrid vector search
 
+MCP:
 ```
 mempalace_search query="<keywords>" wing=<project> [room=<room>] [limit=10] [max_distance=1.5]
 ```
@@ -241,19 +242,30 @@ mempalace_search query="<keywords>" wing=<project> [room=<room>] [limit=10] [max
 - `max_distance` — cosine distance threshold (lower = stricter)
 - `wing`/`room` — optional scope filters
 
-Output:
+CLI:
 ```
-## 🔍 MemPalace Search: "<query>" (wing=<project>, MCP)
-| Score  | Content                                | Drawer   | Room      |
-|--------|----------------------------------------|----------|-----------|
-| 0.92   | Implemented JWT auth middleware in ...  | #a1b2c3  | decisions |
-| 0.87   | Fixed token refresh race condition...  | #d4e5f6  | tasks     |
-
-3 results (semantic, max_distance=1.5). Full content: mempalace_get_drawer drawer_id="#a1b2c3"
+mempalace search "<query>" --wing <project> [--room <room>] [--results 10]
 ```
 
-CLI fallback: `mempalace search "<query>" --wing <project>` (vector, not semantic).
-File fallback: `grep -r "<query>" MEMORY_TASKS/ MEMORY_ARCHIVE.md` (exact match only).
+- `--results` — max results (default 10)
+- Uses hybrid scoring: cosine similarity + BM25 keyword relevance
+
+Output (agent-formatted from MCP or CLI raw results):
+```
+## 🔍 MemPalace Search: "<query>" (wing=<project>)
+| Rel   | Content                                | Source      | Room      |
+|-------|----------------------------------------|-------------|-----------|
+| 0.53  | moss-mem SKILL.md — triggers for task  | SKILL.md    | moss_mem  |
+|       |   lifecycle, memory init, search...    |             |           |
+| 0.48  | CLAUDE.md — Project overview for       | CLAUDE.md   | skills    |
+|       |   morrow_skills extension repository   |             |           |
+
+3 results. Scores: cosine + BM25 (CLI) or cosine distance (MCP).
+Full drawer: mempalace_get_drawer drawer_id="<id>" (MCP) or re-search with --results 1.
+```
+
+CLI fallback: `mempalace search "<query>" --wing <project>` (hybrid vector+keyword, not full semantic).
+File fallback: `grep -r "<query>" MEMORY_TASKS/ MEMORY_ARCHIVE.md` (exact string match only — no ranking).
 
 ### link — Temporal knowledge graph
 
@@ -371,7 +383,7 @@ Run after every 3-5 completed tasks, or before handoff in CLI-fallback mode.
 mempalace wake-up [--wing <project>]
 ```
 
-Returns L0 (project summary) + L1 (recent drawer activity). Primary context recovery when MCP is down. Also useful as a fast sanity check even in enhanced mode.
+Returns structured context (~800 tokens): `L0 — IDENTITY` (from `~/.mempalace/identity.txt`) + `L1 — ESSENTIAL STORY` (recent drawer summaries grouped by room). Primary context recovery when MCP is down. Also useful as a fast sanity check even in enhanced mode.
 
 ### status — Palace health
 
