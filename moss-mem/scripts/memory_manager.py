@@ -241,9 +241,9 @@ def cmd_start(description: str, next_step: str):
             f.write(f"## Description\n{description}\n\n")
             f.write(f"## Next Step\n{next_step}\n\n")
             f.write(f"## Status\n🔧 In Progress\n\n")
-            f.write(f"## Last Action\n<!-- 本次完成的具体操作，精确到函数/行 -->\n\n")
-            f.write(f"## Key Decisions\n<!-- 重大决策及原因，后续 Agent 遵守不推翻 -->\n\n")
-            f.write(f"## Landmines\n<!-- 已知的坑或危险区域，勿动 -->\n\n")
+            f.write(f"## Last Action\n<!-- pending -->\n\n")
+            f.write(f"## Key Decisions\n<!-- pending -->\n\n")
+            f.write(f"## Landmines\n<!-- none -->\n\n")
             f.write(f"## Created\n{datetime.now().isoformat()}\n\n")
 
         _memory_update({
