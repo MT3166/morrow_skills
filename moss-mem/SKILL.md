@@ -100,6 +100,26 @@ Palace taxonomy for moss-mem:
     room: diary          ← agent session notes
 ```
 
+### MemPalace MCP Tool Reference
+
+All MCP tools used by moss-mem, consolidated for quick lookup. Exact signatures discoverable via the MCP server; the parameters below reflect moss-mem's usage patterns.
+
+| Tool | Purpose | Key Parameters | Used In |
+|------|---------|---------------|---------|
+| `mempalace_status` | Health check | _none_ | Availability check, recovery |
+| `mempalace_search` | Semantic search across palace | `query`, `wing`, `room` (optional), `k` (optional) | search, context |
+| `mempalace_add_drawer` | Add content to a room | `wing`, `room`, `content` | start, update mirroring |
+| `mempalace_update_drawer` | Update existing drawer | `drawer_id`, `content` | complete mirroring |
+| `mempalace_kg_add` | Add knowledge graph edge | `subject`, `predicate`, `object` | link |
+| `mempalace_kg_query` | Query knowledge graph | `entity` | context |
+| `mempalace_create_tunnel` | Cross-project reference | `source_wing`, `source_room`, `target_wing`, `target_room`, `label` | link |
+| `mempalace_diary_read` | Read agent diary entries | `agent_name`, `last_n` | diary, recover, context |
+| `mempalace_diary_write` | Write agent diary entry (AAAK) | `agent_name`, `entry`, `topic` | diary, handoff |
+| `mempalace_get_aaak_spec` | Get AAAK format specification | _none_ | diary (enhanced only) |
+| `mempalace_reconnect` | Refresh HNSW index after external changes | _none_ | troubleshooting |
+| `mempalace_mine` | Index project directory into palace | `dir` (path) | setup (user action) |
+| `mempalace_init` | Initialize new palace | `dir` (path) | setup (user action) |
+
 ## Quick Reference
 
 **File-based commands** (always available):
@@ -426,6 +446,16 @@ Every MCP interaction follows this pattern:
 | `mempalace_kg_add` errors | Entity not found in graph | Skip; relationship captured in task file instead |
 | `mempalace_diary_write` errors | Permission or disk full | Fall back to scratchpad note with `[DIARY]` prefix |
 | Multiple tools timeout in sequence | MCP server overloaded | Degrade to file-only for rest of session |
+
+### User Confirmation Checkpoints
+
+| Operation | Confirm? | Rationale |
+|-----------|----------|-----------|
+| `mempalace_search` / `diary read` / `kg_query` | No | Read-only, no side effects |
+| `mempalace_add_drawer` / `update_drawer` (mirroring) | No | Best-effort cache of file state; file is system of record |
+| `mempalace_kg_add` / `create_tunnel` (link) | **Yes** | Creates persistent graph connections; show relationship before writing |
+| `mempalace_diary_write` | **Yes** | Permanent diary entry; draft and confirm before writing |
+| `mempalace_init` / `mine` | **Yes** | One-time project setup with lasting effects |
 
 ## Agent Handoff Protocol
 
