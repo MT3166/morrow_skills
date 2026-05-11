@@ -122,6 +122,20 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
 - **MemPalace MCP** (primary): installed via `pip install mempalace`, initialized via `mempalace init <dir> --yes && mempalace mine <dir> --wing <project>`, registered via `claude mcp add mempalace -- mempalace-mcp`.
 - **MemPalace CLI** (fallback): same binary — `mempalace --version` confirms availability.
 
+### Authoritative References
+
+These external sources stay current independently — prefer them over hardcoded instructions when in doubt:
+
+| Resource | What it provides | When to use |
+|----------|-----------------|-------------|
+| `mempalace instructions init` | Latest init workflow | Setup troubleshooting |
+| `mempalace instructions search` | Latest search guidance | Search syntax questions |
+| `mempalace instructions mine` | Latest mining modes + flags | Mine configuration |
+| `mempalace instructions status` | Latest status interpretation | Palace health check |
+| `mempalace instructions help` | Full CLI reference | Discovery / unknown features |
+| `mempalace_get_aaak_spec` (MCP) | Authoritative AAAK format spec | Diary entry format questions |
+| `mempalace --help` | Top-level subcommand list | Quick refresh |
+
 ## Availability Detection
 
 Check once per session:
@@ -132,6 +146,8 @@ Check once per session:
    Try mempalace --version (CLI) → success = cli-fallback mode
 3. If neither available → file-only mode
 ```
+
+In enhanced and cli-fallback modes, `mempalace instructions help` provides a current capability overview — use it when unsure about available subcommands.
 
 | Mode | Search | KG | Diary | Mirroring | Context Recovery |
 |------|--------|----|-------|-----------|-----------------|
