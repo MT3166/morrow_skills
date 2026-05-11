@@ -105,15 +105,21 @@ When moss-mem is invoked, follow this decision flow:
 ```
 1. Parse user intent → which operation? (init/start/update/complete/search/link/diary/show/context)
 
-2. Check mempalace availability:
-   Call mempalace_status once.
-   If "No palace found" → file-only mode (skip MCP steps)
-   If success → enhanced mode (file + MCP)
+2. Check mempalace availability (once per session):
+   Call mempalace_status with 5s timeout expectation.
+   Map result to mode per "Availability Check" table in Fault Tolerance section.
+   If file-only → mention once, then skip all MCP steps silently.
 
-3. Execute the operation (see command sections below)
+3. Execute the operation:
+   - File-based commands (init/start/update/complete/add-note/show/recover/check):
+     Run Python script first (system of record), then mirror to palace if enhanced.
+   - MCP-powered commands (search/link/diary/context):
+     Use MCP Call Wrapper Pattern: check mode → call MCP → fallback on failure.
+     See "Per-Operation Fallback Table" for exact fallback per tool.
 
-4. If enhanced mode AND operation mutates state:
-   Mirror key facts to palace (see "Palace Mirroring" below)
+4. If any MCP call fails during enhanced mode:
+   Log once to scratchpad, use fallback, degrade level for subsequent calls.
+   Never let an MCP failure block the user's intent.
 ```
 
 ## Prerequisites
@@ -229,39 +235,66 @@ These commands only execute when mempalace is available. Check with `mempalace_s
 ### search — Semantic task search
 ```
 User: "find tasks about authentication"
-→ mempalace_search query="authentication tasks decisions" wing=<project>
-→ Present results with similarity scores and drawer IDs
-→ If no results or MCP unavailable: grep MEMORY_TASKS/ and MEMORY_ARCHIVE.md
+
+Enhanced path:
+  mempalace_search query="authentication tasks decisions" wing=<project>
+  → Present results with similarity scores and drawer IDs
+
+Fallback (file-only or MCP call fails):
+  grep -r "auth\|authentication\|login\|token\|session" MEMORY_TASKS/ MEMORY_ARCHIVE.md
+  → Present matching files with line context
+  → Note: keyword match, not semantic — results may miss conceptually related tasks
 ```
 
 ### link — Connect related tasks/decisions
 ```
 User: "the rate-limiting work relates to our earlier API security task"
-→ mempalace_kg_add subject="rate-limiting-task" predicate="relates_to" object="api-security-task"
-→ mempalace_create_tunnel source_wing=<project> source_room=tasks target_wing=<project> target_room=tasks label="rate-limiting → api-security"
-→ Also note the relationship in the current task file's ## Key Decisions
+
+Enhanced path:
+  mempalace_kg_add subject="rate-limiting-task" predicate="relates_to" object="api-security-task"
+  mempalace_create_tunnel source_wing=<project> source_room=tasks target_wing=<project> target_room=tasks label="rate-limiting → api-security"
+
+Fallback (file-only or MCP call fails):
+  → Append to current task file ## Key Decisions:
+    "Related: rate-limiting-task → api-security-task (relates_to)"
+  → Relationship is preserved in file for human review but not traversable via graph
 ```
 
 ### diary — Agent session journal
 ```
-Read:  mempalace_diary_read agent_name="claude" last_n=5
-Write: mempalace_diary_write agent_name="claude" entry="SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★" topic="auth-work"
+Read:
+  Enhanced: mempalace_diary_read agent_name="claude" last_n=5
+  Fallback: read scratchpad section from MEMORY.md (recent notes, less structured)
+
+Write:
+  Enhanced: mempalace_diary_write agent_name="claude" entry="SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★" topic="auth-work"
+  Fallback: moss-mem add-note -n "[DIARY] SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★"
 ```
 
-Use AAAK format for diary entries: entity codes, `*emotion*` markers, pipe-separated fields, ISO dates, ★ importance ratings. Get the full spec via `mempalace_get_aaak_spec` when needed.
+Use AAAK format for diary entries: entity codes, `*emotion*` markers, pipe-separated fields, ISO dates, ★ importance ratings. Get the full spec via `mempalace_get_aaak_spec` when MCP is available; fall back to the built-in format: `SESSION:YYYY-MM-DD|topic|KEY.dec:item|★★★`.
 
 ### context — Rich context recovery
 ```
 User: "what were we working on?" (after long absence)
-→ Step 1: moss-mem show (file-based current task pointer)
-→ Step 2: mempalace_diary_read agent_name="claude" last_n=10 (recent session notes)
-→ Step 3: mempalace_search query=<extracted topic from current task> (related past work)
-→ Step 4: mempalace_kg_query entity=<project> (task relationship graph)
-→ Step 5: Synthesize a context summary:
-   - Current task + next step
-   - Key decisions (from task file + palace)
-   - Related past tasks (from search + graph)
-   - Recent agent diary entries
+
+Step 1: moss-mem show (file-based, always works)
+  → Current task + next step + key decisions + landmines
+
+Step 2: Try mempalace_diary_read agent_name="claude" last_n=10
+  → Fallback: read scratchpad notes from MEMORY.md (look for [DIARY] prefix)
+
+Step 3: Try mempalace_search query=<extracted topic from current task>
+  → Fallback: grep -r "<topic keywords>" MEMORY_TASKS/ MEMORY_ARCHIVE.md
+
+Step 4: Try mempalace_kg_query entity=<project>
+  → Fallback: grep -r "<project>" MEMORY_TASKS/ for manual relationship discovery
+
+Step 5: Synthesize a context summary from whatever sources succeeded:
+   - Current task + next step (always available from file)
+   - Key decisions (from task file; palace decisions if MCP worked)
+   - Related past tasks (from search/grep results)
+   - Recent agent diary entries (from MCP or scratchpad [DIARY] notes)
+   - Note which sources were used: "[file only]" or "[file + MCP]"
 ```
 
 ## Palace Mirroring
@@ -278,6 +311,89 @@ Whenever file-based commands mutate state AND mempalace is available, mirror key
 
 Mirroring is best-effort: file operations must never fail because palace mirroring failed.
 
+## MCP Fault Tolerance & Progressive Degradation
+
+### Availability Check (run once per session)
+
+```
+mempalace_status
+```
+
+| Response | Meaning | Mode |
+|----------|---------|------|
+| Palace info returned | MCP fully available | `enhanced` |
+| "No palace found" | Not initialized in this project | `file-only` |
+| Timeout (>5s) or hang | MCP server unresponsive | `file-only` |
+| Error / exception | MCP server error | `file-only` |
+| Tool not found / unknown command | mempalace MCP not installed | `file-only` |
+
+Cache the result for the session. If `file-only`, mention once ("MemPalace unavailable, using file-based memory") then skip all MCP steps silently.
+
+### Per-Operation Fallback Table
+
+When `file-only` mode, or when a specific MCP call fails even in `enhanced` mode:
+
+| MCP Operation | MCP Tool | Fallback Command | Degraded Behavior |
+|--------------|----------|-----------------|-------------------|
+| Semantic search | `mempalace_search` | `grep -r "<keywords>" MEMORY_TASKS/ MEMORY_ARCHIVE.md` | Keyword match instead of semantic; results not relevance-ranked |
+| Add task to palace | `mempalace_add_drawer` | None (skip silently) | Task only in MEMORY_TASKS/ file |
+| Update palace drawer | `mempalace_update_drawer` | None (skip silently) | Palace state may be stale on next MCP availability |
+| Knowledge graph query | `mempalace_kg_query` | `grep -r "<entity>" MEMORY_TASKS/` | Manual relationship discovery instead of graph traversal |
+| Knowledge graph add | `mempalace_kg_add` | Append relationship to task file `## Key Decisions` | Relationship captured but not traversable |
+| Create tunnel | `mempalace_create_tunnel` | None (skip silently) | Cross-reference lost until MCP restored |
+| Read diary | `mempalace_diary_read` | Read scratchpad section from MEMORY.md | Recent notes instead of structured diary entries |
+| Write diary | `mempalace_diary_write` | Append `[DIARY] <content>` to scratchpad via `add-note` | Less structured but preserved for next session |
+| Get AAAK spec | `mempalace_get_aaak_spec` | Use built-in format (see below) | Basic AAAK without full spec guidance |
+
+**Built-in AAAK fallback format**: `SESSION:YYYY-MM-DD|topic|KEY.dec:item|★★★`
+
+### Progressive Degradation
+
+Not binary — handle partial MCP failures:
+
+```
+Level 0 — Full MCP: all tools respond within timeout
+  → Use MCP for everything, mirror to palace
+
+Level 1 — Partial MCP: some tools work, others fail/timeout
+  → Use MCP for working tools, fallback for failed ones
+  → Report degraded tools to user once, continue
+
+Level 2 — MCP degraded: all tools timeout but status responds
+  → File-only mode; suggest user run `mempalace reconnect`
+
+Level 3 — MCP unavailable: status check itself fails
+  → File-only mode; no further MCP attempts this session
+```
+
+### MCP Call Wrapper Pattern
+
+Every MCP interaction follows this pattern:
+
+```
+1. Check cached availability mode (from mempalace_status)
+2. If file-only → use fallback immediately, skip MCP call
+3. If enhanced → call MCP tool
+4. If MCP call fails (timeout / error / empty result):
+   a. Note failure once in scratchpad (don't spam)
+   b. Use fallback from table above
+   c. Degrade availability level for subsequent calls of same type
+5. Never retry a failed MCP call in the same session
+6. File operations (MEMORY.md writes) happen BEFORE palace mirroring,
+   so file state is always consistent even if mirroring fails
+```
+
+### Timeout & Error Patterns
+
+| Symptom | Likely Cause | Action |
+|---------|-------------|--------|
+| `mempalace_status` hangs >5s | MCP server not running | File-only mode; suggest user check `mcp.json` |
+| `mempalace_search` returns `[]` | Empty palace or query mismatch | Fall back to grep; suggest `mempalace mine <dir>` if palace empty |
+| `mempalace_add_drawer` errors | Palace not initialized | Skip mirroring; suggest `mempalace init <dir>` |
+| `mempalace_kg_add` errors | Entity not found in graph | Skip; relationship captured in task file instead |
+| `mempalace_diary_write` errors | Permission or disk full | Fall back to scratchpad note with `[DIARY]` prefix |
+| Multiple tools timeout in sequence | MCP server overloaded | Degrade to file-only for rest of session |
+
 ## Agent Handoff Protocol
 
 **Always follow this sequence** when handing off (session end, context switch, or before `complete`):
@@ -286,12 +402,14 @@ Mirroring is best-effort: file operations must never fail because palace mirrori
 1. moss-mem check           ← verify completeness
 2. moss-mem check --fix     ← auto-fill if possible
 3. moss-mem update -l/-k/-m ← fill remaining fields manually
-4. moss-mem diary -n "..."  ← write session diary entry (MCP mode)
+4. moss-mem diary -n "..."  ← write session diary entry
+   → Enhanced: mempalace_diary_write (structured AAAK entry)
+   → File-only: moss-mem add-note -n "[DIARY] SESSION:YYYY-MM-DD|topic|key_points|★★★"
 5. moss-mem complete        ← archive task
 6. moss-mem start -d "..." -n "..."  ← new task for next agent
 ```
 
-A complete task file + palace diary entry enables full context recovery in <30 seconds.
+A complete task file enables context recovery. Palace diary entries add searchable session notes but file-based `[DIARY]` scratchpad notes serve as fallback.
 
 ## Task File Format
 
@@ -373,9 +491,12 @@ MEMORY_TASKS/MEMORY_ARCHIVE.md    ← completed task log
 | Session killed mid-handoff | `kill -9` scenario | `moss-mem recover` then `moss-mem check --fix` |
 | Task idle >7 days | Stale task | `moss-mem recover` to assess + `moss-mem complete` or restart |
 | `check --fix` fails to fill Key Decisions | No new directories in git diff | Manual judgment required — mark as `<!-- none -->` |
-| MemPalace not available | `mempalace_status` returns "No palace found" | Run `mempalace init <dir> && mempalace mine <dir>`, or continue in file-only mode |
-| MemPalace search returns no results | Palace empty or query too specific | Broaden query; fall back to `grep -r` across MEMORY_TASKS/ |
+| MemPalace not installed | `mempalace_status` returns "Tool not found" | File-only mode; all operations work, search is grep-based |
+| MemPalace not initialized | `mempalace_status` returns "No palace found" | File-only mode; optionally run `mempalace init <dir> && mempalace mine <dir>` |
+| MemPalace search returns no results | Palace empty or query too specific | Fall back to `grep -r` per fallback table; suggest `mempalace mine` |
 | MemPalace index stale | External modification to palace | Call `mempalace_reconnect` to refresh HNSW index |
+| MCP tools hang/timeout | MCP server unresponsive | Degrade to file-only for rest of session; see Fault Tolerance section |
+| Partial MCP failures | Some tools work, others don't | Use Progressive Degradation: MCP for working tools, fallback for failed ones |
 
 ## Skill Integration
 
@@ -391,4 +512,5 @@ MEMORY_TASKS/MEMORY_ARCHIVE.md    ← completed task log
 3. **Why single `_memory_update()`?** Guarantees MEMORY.md never partially written; section parse is idempotent.
 4. **Why `<!-- none -->` placeholder?** Distinguishes "intentionally empty" from "forgot to fill."
 5. **Why git integration for auto-fix?** Git is always present in code projects; diff/log provide free context for recovery.
-6. **Why best-effort palace mirroring?** File operations are the system of record; palace is a cache that amplifies search and discovery.
+6. **Why best-effort palace mirroring?** File operations are the system of record; MCP is a cache that amplifies search and discovery. Every MCP operation has a file-based fallback — the system degrades gracefully, never fails.
+7. **Why progressive degradation?** MCP availability is not binary — network, server load, or partial installation can cause selective failures. Handling each tool independently maximizes what still works rather than abandoning all MCP features.
