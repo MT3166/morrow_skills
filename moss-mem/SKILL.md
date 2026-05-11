@@ -51,6 +51,34 @@ version: "2.0"
 
 Two-layer memory: `MEMORY.md` as lightweight startup index + **MemPalace MCP** for semantic search, task relationships, and cross-session agent diary. Falls back to file-only mode when MCP unavailable.
 
+### Quick Decision Tree
+
+```
+User says: "start task X" / "new task X"
+  → python3 {base_dir}/scripts/memory_manager.py start -d "X" -n "next step"
+  → (enhanced) mempalace_add_drawer room:tasks — skip on failure
+
+User says: "update progress" / "status update"
+  → python3 {base_dir}/scripts/memory_manager.py update -d "X" -n "Y" -s "🔧"
+  → (enhanced) if -k/-m non-empty: mirror to palace — skip on failure
+
+User says: "complete task" / "finish task"
+  → moss-mem check → check --fix → update -l/-k/-m → complete → start (handoff protocol)
+  → (enhanced) diary write before complete — fallback: [DIARY] scratchpad note
+
+User says: "search memory" / "find tasks about X"
+  → (enhanced) mempalace_search query=X → show with scores
+  → (file-only) grep -r "X" MEMORY_TASKS/ MEMORY_ARCHIVE.md
+
+User says: "handoff" / "context switch" / "交接"
+  → Full Agent Handoff Protocol (6 steps) — see below
+  → Enhanced steps use MCP with fallback at each step
+
+User says: "what were we working on?" (context recovery)
+  → moss-mem show → try diary read → try search → try kg query → synthesize
+  → Each step degrades independently — file state always available
+```
+
 ## Two-Layer Architecture
 
 ```
@@ -159,7 +187,7 @@ python3 {base_dir}/scripts/memory_manager.py start -d "Description" -n "Next ste
 ```
 Creates `MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md` and updates pointer in MEMORY.md. Status → 🔧.
 
-**Enhanced mode**: also call `mempalace_add_drawer` with `wing: <project>, room: tasks` containing description + next step.
+**Enhanced mode**: also call `mempalace_add_drawer` with `wing: <project>, room: tasks` containing description + next step. On failure: skip silently (palace mirroring is best-effort, see Fault Tolerance).
 
 ### update
 ```
@@ -188,6 +216,7 @@ python3 {base_dir}/scripts/memory_manager.py update \
 **Enhanced mode**: when `-k` (key decisions) or `-m` (landmines) are non-empty, mirror them to palace:
 - `mempalace_add_drawer` with `room: decisions` or `room: landmines`
 - `mempalace_kg_add` if decisions relate to prior work
+- On any MCP failure: skip silently — file state is already updated (see Fault Tolerance)
 
 ### complete
 ```
@@ -214,7 +243,7 @@ python3 {base_dir}/scripts/memory_manager.py recover
 ```
 Automated interrupt recovery. Checks: (1) lock file → (2) task file completeness → (3) `git diff HEAD` → (4) `git log --oneline -5` → (5) `git stash list`. Guides next action.
 
-**Enhanced mode**: also call `mempalace_diary_read` for recent agent entries that may contain recovery context.
+**Enhanced mode**: also call `mempalace_diary_read agent_name="claude" last_n=5` for recent agent entries that may contain recovery context. On failure: skip, continue with git-based recovery.
 
 ### check
 ```
@@ -250,14 +279,17 @@ Fallback (file-only or MCP call fails):
 ```
 User: "the rate-limiting work relates to our earlier API security task"
 
-Enhanced path:
-  mempalace_kg_add subject="rate-limiting-task" predicate="relates_to" object="api-security-task"
-  mempalace_create_tunnel source_wing=<project> source_room=tasks target_wing=<project> target_room=tasks label="rate-limiting → api-security"
+1. Confirm the relationship with user before writing:
+   "Link: 'rate-limiting' → relates_to → 'api-security'. OK?"
 
-Fallback (file-only or MCP call fails):
-  → Append to current task file ## Key Decisions:
-    "Related: rate-limiting-task → api-security-task (relates_to)"
-  → Relationship is preserved in file for human review but not traversable via graph
+2. Enhanced path:
+   mempalace_kg_add subject="rate-limiting-task" predicate="relates_to" object="api-security-task"
+   mempalace_create_tunnel source_wing=<project> source_room=tasks target_wing=<project> target_room=tasks label="rate-limiting → api-security"
+
+3. Fallback (file-only or MCP call fails):
+   → Append to current task file ## Key Decisions:
+     "Related: rate-limiting-task → api-security-task (relates_to)"
+   → Relationship is preserved in file for human review but not traversable via graph
 ```
 
 ### diary — Agent session journal
@@ -267,8 +299,9 @@ Read:
   Fallback: read scratchpad section from MEMORY.md (recent notes, less structured)
 
 Write:
-  Enhanced: mempalace_diary_write agent_name="claude" entry="SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★" topic="auth-work"
-  Fallback: moss-mem add-note -n "[DIARY] SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★"
+  1. Draft the diary entry and show to user for confirmation
+  2. Enhanced: mempalace_diary_write agent_name="claude" entry="SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★" topic="auth-work"
+  3. Fallback: moss-mem add-note -n "[DIARY] SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★"
 ```
 
 Use AAAK format for diary entries: entity codes, `*emotion*` markers, pipe-separated fields, ISO dates, ★ importance ratings. Get the full spec via `mempalace_get_aaak_spec` when MCP is available; fall back to the built-in format: `SESSION:YYYY-MM-DD|topic|KEY.dec:item|★★★`.
