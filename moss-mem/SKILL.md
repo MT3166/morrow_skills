@@ -1,10 +1,14 @@
 ---
 name: moss-mem
-description: "Project memory management for Claude Code sessions. Two-layer: MEMORY.md (file index) + MemPalace MCP (semantic search, knowledge graph, agent diary) with CLI fallback (mine, wake-up, repair). Triggers: init/start/update/complete task, search memory, link tasks, handoff/context switch."
+description: >-
+  Three-tier project memory for Claude Code sessions:
+  MEMORY.md (file, always available) → MemPalace MCP (semantic search,
+  temporal KG, agent diary, real-time mirroring) → MemPalace CLI (vector
+  search, wake-up, bulk mine, repair). Degrades gracefully when MCP/CLI
+  unavailable. Triggers: task lifecycle, memory ops, search, link, diary,
+  handoff, wake-up.
 triggers:
-  - initialize memory
-  - init memory
-  - 新项目初始化记忆
+  # ── Task lifecycle ──
   - start task
   - new task
   - begin task
@@ -16,22 +20,33 @@ triggers:
   - complete task
   - finish task
   - 完成任务
-  - add note
-  - scratchpad
-  - 笔记
-  - check memory
-  - read memory
-  - 查看记忆
-  - 当前状态
   - show task
   - show memory
   - 查看任务
+  - 当前状态
   - 查看交接状态
+
+  # ── Memory initialization & maintenance ──
+  - initialize memory
+  - init memory
+  - 新项目初始化记忆
+  - check memory
+  - read memory
+  - 查看记忆
+  - add note
+  - scratchpad
+  - 笔记
+
+  # ── Search & discovery ──
   - search memory
   - find task
   - 搜索记忆
   - 找任务
   - 查找
+  - mine memory
+  - 挖掘记忆
+
+  # ── Knowledge continuity ──
   - link task
   - relate task
   - 关联任务
@@ -42,8 +57,6 @@ triggers:
   - 交接
   - 接力
   - context switch
-  - mine memory
-  - 挖掘记忆
   - wake up
   - 唤醒
 version: "3.1"
