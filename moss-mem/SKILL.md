@@ -289,10 +289,29 @@ Enhanced path:
   mempalace_search query="authentication tasks decisions" wing=<project>
   → Present results with similarity scores and drawer IDs
 
+Output format (enhanced):
+  ## 🔍 MemPalace Search: "authentication"
+  | Score | Content (truncated)                    | Drawer   |
+  |-------|----------------------------------------|----------|
+  | 0.92  | Implemented JWT auth middleware in api/ | #a1b2c3  |
+  | 0.87  | Fixed token refresh race condition...   | #d4e5f6  |
+  | 0.74  | Added rate limiting to login endpoint   | #g7h8i9  |
+
+  **Top match** (#a1b2c3): `moss-mem show --file MEMORY_TASKS/archive/20260415-auth-task.md`
+  3 results from MemPalace (semantic). Use drawer IDs to inspect full content.
+
 Fallback (file-only or MCP call fails):
   grep -r "auth\|authentication\|login\|token\|session" MEMORY_TASKS/ MEMORY_ARCHIVE.md
   → Present matching files with line context
-  → Note: keyword match, not semantic — results may miss conceptually related tasks
+
+Output format (file-only):
+  ## 🔍 File Search: "authentication"
+  Found lines in MEMORY_TASKS/20260415-auth-task.md:
+    L12: Implemented JWT authentication middleware
+    L23: Key Decision: JWT stored in httpOnly cookies
+  Found in MEMORY_ARCHIVE.md:
+    L45: - 2026-04-10 Added OAuth2 social login support
+  ⚠️ Keyword match only — conceptually related tasks may be missed.
 ```
 
 ### link — Connect related tasks/decisions
@@ -306,10 +325,20 @@ User: "the rate-limiting work relates to our earlier API security task"
    mempalace_kg_add subject="rate-limiting-task" predicate="relates_to" object="api-security-task"
    mempalace_create_tunnel source_wing=<project> source_room=tasks target_wing=<project> target_room=tasks label="rate-limiting → api-security"
 
+   Output:
+     ## 🔗 Link Created
+     `rate-limiting` —[relates_to]→ `api-security`
+     KG edge added + cross-room tunnel created.
+     Query either entity to traverse: `mempalace_kg_query entity="api-security"`
+
 3. Fallback (file-only or MCP call fails):
    → Append to current task file ## Key Decisions:
      "Related: rate-limiting-task → api-security-task (relates_to)"
-   → Relationship is preserved in file for human review but not traversable via graph
+
+   Output:
+     ## 🔗 Link Noted (file-only)
+     Relationship recorded in task file ## Key Decisions.
+     Not graph-traversable — re-run when MemPalace available.
 ```
 
 ### diary — Agent session journal
@@ -318,13 +347,42 @@ Read:
   Enhanced: mempalace_diary_read agent_name="claude" last_n=5
   Fallback: read scratchpad section from MEMORY.md (recent notes, less structured)
 
+Output format (read):
+  ## 📓 Agent Diary (last 5 entries)
+  | Date       | Topic        | Key Decisions / Actions              | ★   |
+  |------------|-------------|--------------------------------------|-----|
+  | 2026-05-11 | auth-module | JWT in httpOnly cookies              | ★★★ |
+  | 2026-05-10 | api-refactor| Extracted middleware, 3 files changed | ★★☆ |
+  | 2026-05-09 | bug-hunt    | Found race condition in token refresh | ★★★ |
+
 Write:
   1. Draft the diary entry and show to user for confirmation
-  2. Enhanced: mempalace_diary_write agent_name="claude" entry="SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★" topic="auth-work"
-  3. Fallback: moss-mem add-note -n "[DIARY] SESSION:2026-05-11|built.auth.module|KEY.dec:JWT.in.cookies|★★★"
+  2. Enhanced: mempalace_diary_write agent_name="claude" entry="<AAAK entry>" topic="<topic>"
+  3. Fallback: moss-mem add-note -n "[DIARY] <AAAK entry>"
 ```
 
-Use AAAK format for diary entries: entity codes, `*emotion*` markers, pipe-separated fields, ISO dates, ★ importance ratings. Get the full spec via `mempalace_get_aaak_spec` when MCP is available; fall back to the built-in format: `SESSION:YYYY-MM-DD|topic|KEY.dec:item|★★★`.
+**AAAK format** for diary entries: pipe-separated fields, ISO dates, ★ importance (1-3). Built-in format when MCP spec unavailable:
+
+```
+SESSION:YYYY-MM-DD|topic_code|KEY.dec:decision_summary|LANDMINE:fragile_area|★★★
+```
+
+**AAAK examples by scenario:**
+
+| Scenario | AAAK Entry |
+|----------|-----------|
+| Feature built | `SESSION:2026-05-11|auth.module|built.JWT.middleware|KEY.dec:cookies.over.localStorage|★★★` |
+| Bug fixed | `SESSION:2026-05-11|token.refresh|fixed.race.condition|LANDMINE:auth.py.L45-L60.untested|★★★` |
+| Decision made | `SESSION:2026-05-11|api.design|KEY.dec:REST.over.GraphQL|*confident*|★★☆` |
+| Blocker hit | `SESSION:2026-05-11|db.migration|blocked.by.schema.lock|*frustrated*|NEED: DBA.approval|★★★` |
+| Handoff | `SESSION:2026-05-11|handoff|completed.auth.module|NEXT:test.login.flow|★★★` |
+
+**When to proactively write diary entries** (without user asking):
+- After completing a significant task or milestone
+- After making an architectural decision (capture rationale)
+- When hitting a blocker or discovering a landmine
+- Before session end / handoff (always)
+- After fixing a non-obvious bug (capture root cause)
 
 ### context — Rich context recovery
 ```
@@ -342,12 +400,53 @@ Step 3: Try mempalace_search query=<extracted topic from current task>
 Step 4: Try mempalace_kg_query entity=<project>
   → Fallback: grep -r "<project>" MEMORY_TASKS/ for manual relationship discovery
 
-Step 5: Synthesize a context summary from whatever sources succeeded:
-   - Current task + next step (always available from file)
-   - Key decisions (from task file; palace decisions if MCP worked)
-   - Related past tasks (from search/grep results)
-   - Recent agent diary entries (from MCP or scratchpad [DIARY] notes)
-   - Note which sources were used: "[file only]" or "[file + MCP]"
+Step 5: Synthesize a context summary using the template below.
+```
+
+**Context recovery output template** — always produce this structure:
+
+```
+## 📋 Context Recovery: <project>
+
+### 🎯 Current Task
+<Task description from MEMORY.md pointer>
+**Next Step**: <next step from task file>
+**Status**: 🔧 | ✅ | ❌
+
+### 📝 Recent Activity
+| When      | What                                    | Source     |
+|-----------|-----------------------------------------|------------|
+| 2026-05-11| <latest diary entry or last action>     | diary/file |
+| 2026-05-10| <previous entry>                        | diary/file |
+
+### 🔑 Key Decisions (do not revert)
+- <from task file ## Key Decisions>
+- <from palace decisions search, if available>
+
+### ⚠️ Landmines
+- <from task file ## Landmines>
+
+### 🔗 Related Past Work
+<If MCP: search results + kg edges>
+<If file-only: grep matches from MEMORY_TASKS/ and archive>
+
+### 📊 Sources
+[file] MEMORY.md + MEMORY_TASKS/<current>  ← always available
+[MCP] diary: 3 entries found               ← if MCP available
+[MCP] search: 2 related tasks              ← if MCP available
+[file] archive grep: 1 match               ← fallback if MCP unavailable
+
+### ▶️ Recommended Next Action
+<Single concrete next step — the most important line in recovery>
+```
+
+**Recovery quality tiers:**
+| Tier | Sources Available | Recovery Quality |
+|------|------------------|-----------------|
+| Full | file + MCP (search + diary + kg) | Complete picture with semantic relationships |
+| Partial | file + some MCP (e.g., diary only) | Current task + recent notes, missing deep search |
+| Minimal | file only | Current task + next step, grep for related work |
+| Bare | file only, empty handoff fields | Current task pointer only — agent must explore |
 ```
 
 ## Palace Mirroring

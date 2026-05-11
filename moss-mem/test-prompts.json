@@ -20,7 +20,7 @@
   {
     "id": 4,
     "prompt": "现在要交接给下一个 Agent，请完成交接流程",
-    "expected": "依次执行 check → check --fix → update -l/-k/-m → complete → start，填写 Last Action / Key Decisions / Landmines 三个字段",
+    "expected": "依次执行 check → check --fix → update -l/-k/-m → diary write → complete → start，填写 Last Action / Key Decisions / Landmines 三个字段，写入 AAAK 格式日记",
     "type": "handoff_protocol"
   },
   {
@@ -28,5 +28,29 @@
     "prompt": "moss-mem --action start --description '搭建 CI 流水线' --status '🔧'",
     "expected": "解析 --action start --description X --status Y 并映射到 python3 {base_dir}/scripts/memory_manager.py start -d 'X' -s '🔧'",
     "type": "action_style_invocation"
+  },
+  {
+    "id": 6,
+    "prompt": "搜索一下之前做过的认证相关的任务",
+    "expected": "检查 MCP 可用性 → mempalace_search query='认证' wing=<project> → 按分数表格输出，含 drawer ID；MCP不可用时 fallback 到 grep 关键词搜索，标注 'keyword match only'",
+    "type": "mcp_search"
+  },
+  {
+    "id": 7,
+    "prompt": "写一条会话日记：今天完成了 JWT 认证中间件的重构，关键决策是将 token 存在 httpOnly cookie 而非 localStorage",
+    "expected": "草拟 AAAK 格式条目 → 展示给用户确认 → mempalace_diary_write 或 fallback add-note [DIARY]；AAAK: SESSION:YYYY-MM-DD|auth.middleware|refactored.JWT|KEY.dec:cookies.over.localStorage|★★★",
+    "type": "mcp_diary"
+  },
+  {
+    "id": 8,
+    "prompt": "我离开了一段时间，帮我恢复上下文，看看之前在做什么",
+    "expected": "执行5步恢复：show → diary_read → search → kg_query → synthesize → 按模板输出 Context Recovery 摘要，含 Current Task / Recent Activity / Key Decisions / Landmines / Related Work / Sources / Recommended Next Action",
+    "type": "mcp_context"
+  },
+  {
+    "id": 9,
+    "prompt": "把 API 限流这个任务和之前 API 安全加固的任务关联起来",
+    "expected": "先确认关系 → mempalace_kg_add + mempalace_create_tunnel；fallback 写 Key Decisions；输出 🔗 Link Created 或 🔗 Link Noted (file-only) 格式",
+    "type": "mcp_link"
   }
 ]
