@@ -2,16 +2,21 @@
   {
     "id": 1,
     "prompt": "帮我用 moss 评审 claude-opus-4 完成的这个 PR：修复了登录接口的 JWT 校验 bug，我已验证主流程可运行，但 token 过期的边界没处理，代码里有两处直接 print(token) 调试语句忘删了",
-    "expected": "输出评审卡片（总分约6-7分）；代码质量因泄露 token 扣分且严重度 high；生成 evaluations/claude-opus-4/{timestamp}/DEDUCTIONS.md；包含 B1 bug 记录（token 泄露）和 D1 扣分项（边界未处理）"
+    "expected": "输出评审卡片（总分约6-7分），并包含五行评分总结：总分、需求 A/5、代码 B/3、轨迹 C/2、封顶；代码质量因泄露 token 扣分且严重度 high；生成 evaluations/claude-opus-4/{timestamp}/DEDUCTIONS.md；包含 B1 bug 记录（token 泄露）和 D1 扣分项（边界未处理）"
   },
   {
     "id": 2,
     "prompt": "评审 gpt-4o 跑的重构任务：把 utils.py 拆成了 5 个模块，接口不变，单元测试全通过，但我发现它顺手把整个项目的缩进从 tab 改成了 space，导致 git diff 极其难看",
-    "expected": "代码质量扣分项「大范围无关改动」严重度 medium；总分约7-8；生成 evaluations/gpt-4o/{timestamp}/DEDUCTIONS.md；改进建议要求回滚格式化改动"
+    "expected": "包含五行评分总结：总分、需求 A/5、代码 B/3、轨迹 C/2、封顶；代码质量扣分项「大范围无关改动」严重度 medium；总分约7-8；生成 evaluations/gpt-4o/{timestamp}/DEDUCTIONS.md；改进建议要求回滚格式化改动"
   },
   {
     "id": 3,
     "prompt": "moss打分，deepseek-v3 写的新增用户注册功能，没提供任何运行截图或测试结果，功能描述说主流程应该通了",
-    "expected": "触发「未验证」规则：需求完成度上限4分，轨迹质量上限1分；总分≤5；DEDUCTIONS.md 的封顶说明区填写；证据目录 evaluations/deepseek-v3/{timestamp}/ 创建，evidence/ 目录为空并注明「用户未提供」"
+    "expected": "触发「未验证」规则：需求完成度上限4分，轨迹质量上限1分；总分≤5；输出五行评分总结且封顶行写清原因；DEDUCTIONS.md 的封顶说明区填写；证据目录 evaluations/deepseek-v3/{timestamp}/ 创建，evidence/ 目录为空并注明「用户未提供」"
+  },
+  {
+    "id": 4,
+    "prompt": "用 moss 评审 qwen-code 做的全栈脚手架：默认交付无法构建，Dockerfile 写错，前端核心页面没有真正交付；计划完成 9/12，subagent 中途终止，但最终回复仍说任务完成",
+    "expected": "输出五行评分总结，格式类似：总分 2/10；需求 1/5：默认交付无法构建，前端核心页面也没有真正交付；代码 0/3：Dockerfile 存在错误；轨迹 0/2：计划完成 9/12，subagent 终止，整体 agent 仍认为任务完成；封顶：是，不可运行。"
   }
 ]
