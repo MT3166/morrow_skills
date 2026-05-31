@@ -8,7 +8,7 @@
   {
     "id": 2,
     "prompt": "更新任务进度：已完成auth.py重构，下一步是测试登录，状态进行中",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py update -d '完成auth.py重构' -n '测试登录' -s '🔧'",
+    "expected": "使用 {base_dir}/scripts/memory_manager.py update -d '已完成auth.py重构' -n '测试登录' -s '🔧'",
     "type": "update_task"
   },
   {
@@ -25,9 +25,9 @@
   },
   {
     "id": 5,
-    "prompt": "moss-mem --action start --description '搭建 CI 流水线' --status '🔧'",
-    "expected": "解析 --action start --description X --status Y 并映射到 python3 {base_dir}/scripts/memory_manager.py start -d 'X' -s '🔧'",
-    "type": "action_style_invocation"
+    "prompt": "开始一个新任务：搭建 CI 流水线，下一步是编写 pipeline 配置",
+    "expected": "使用 {base_dir}/scripts/memory_manager.py start -d '搭建 CI 流水线' -n '编写 pipeline 配置'",
+    "type": "start_task_variant"
   },
   {
     "id": 6,
@@ -44,7 +44,7 @@
   {
     "id": 8,
     "prompt": "我离开了一段时间，帮我恢复上下文，看看之前在做什么",
-    "expected": "执行5步恢复：show → diary_read → search → kg_query → synthesize → 按模板输出 Context Recovery 摘要，含 Current Task / Recent Activity / Key Decisions / Landmines / Related Work / Sources / Recommended Next Action",
+    "expected": "执行6步恢复：show → diary_read → search → kg_query → traverse → synthesize → 按模板输出 Context Recovery 摘要，含 Current Task / Recent Activity / Key Decisions / Landmines / Related Work / Sources / Recommended Next Action",
     "type": "mcp_context"
   },
   {
@@ -74,7 +74,7 @@
   {
     "id": 13,
     "prompt": "检查 moss-mem memory layout 和 memory index 是否还是最新；如果我刚更新过任务或 summary，需要告诉我怎么修复",
-    "expected": "运行 python3 {base_dir}/scripts/memory_manager.py knowledge-check 验证 MEMORY.md 与 .moss-mem/{tasks,summaries,index-cache}/；若提示 .moss-mem/index-cache/memory-index.md stale，则运行 knowledge-index 后重跑 knowledge-check；不要把手改生成的 memory-index 当作 doctrine",
+    "expected": "运行 python3 {base_dir}/scripts/memory_manager.py knowledge-check 验证 MEMORY.md、.moss-mem/tasks/、.moss-mem/tasks/MEMORY_ARCHIVE.md、.moss-mem/summaries/ 与 .moss-mem/index-cache/；若提示 .moss-mem/index-cache/memory-index.md stale，则运行 knowledge-index 后重跑 knowledge-check；不要把手改生成的 memory-index 当作 doctrine",
     "type": "harness_knowledge_check"
   }
 ]

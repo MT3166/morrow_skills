@@ -345,18 +345,9 @@ Enhanced (MCP): `mempalace_update_drawer` (mark complete) → `mempalace_sync pr
 | **knowledge-check** | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate memory layout only |
 | **summary-capture** | `python3 {base}/scripts/memory_manager.py summary-capture -t "Topic" -s "Summary"` | Capture harness/session summary to `.moss-mem/summaries/` |
 
-### Skill Invocation Mapping (--action args)
+### Invocation Rule
 
-| Invocation | Python command |
-|-----------|---------------|
-| `--action init` | `init` |
-| `--action start --description "X" --status "🔧"` | `start -d "X" -s "🔧"` |
-| `--action start --description "X" --next "Y"` | `start -d "X" -n "Y"` |
-| `--action update --description "X" --next "Y" --status "🔧"` | `update -d "X" -n "Y" -s "🔧"` |
-| `--action complete --description "X"` | `complete -d "X"` |
-| `--action add-note --note "X"` | `add-note -n "X"` |
-| `--action knowledge-check` | `knowledge-check` |
-| `--action summary-capture --topic "X" --summary "Y"` | `summary-capture -t "X" -s "Y"` |
+Use the concrete Python subcommands above. Do not invent `--action` wrapper arguments; `memory_manager.py` does not implement a top-level `--action` dispatcher.
 
 ## MCP Operations (primary path)
 
