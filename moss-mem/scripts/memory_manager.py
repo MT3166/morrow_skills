@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """
 MOSS_MEM - Memory Management Script
-Handles MEMORY.md and MEMORY_TASKS/ for project context persistence.
+Handles MEMORY.md and .moss-mem/ for project context persistence.
 """
 
 import argparse
 import atexit
 import os
+import shutil
 import signal
 import sys
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
 MEMORY_FILE = "MEMORY.md"
-TASKS_DIR = "MEMORY_TASKS"
+MOSS_DIR = ".moss-mem"
+TASKS_DIR = ".moss-mem/tasks"
+SUMMARIES_DIR = ".moss-mem/summaries"
+INDEX_CACHE_DIR = ".moss-mem/index-cache"
 ARCHIVE_FILE = "MEMORY_ARCHIVE.md"
+OLD_TASKS_DIR = "MEMORY_TASKS"  # legacy — migrated on init
 
 # Auto-detect script location so callers don't need absolute paths
 SCRIPT_DIR = Path(__file__).resolve().parent
-# To invoke from anywhere, use: python3 "$(python3 -c "import os; print(os.path.dirname(os.path.abspath('~/.claude/skills/moss-mem/scripts/memory_manager.py'))))/memory_manager.py" <command>
-# Or add to PATH: export PATH="$PATH:$HOME/.claude/skills/moss-mem/scripts"
+# To invoke from anywhere, call this script by absolute path from the installed skill directory.
+# Or add the installed `moss-mem/scripts` directory to PATH.
 
 
 def get_timestamp():
@@ -28,7 +34,7 @@ def get_timestamp():
 
 
 def ensure_tasks_dir():
-    Path(TASKS_DIR).mkdir(exist_ok=True)
+    Path(TASKS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def check_concurrent_edit():
@@ -195,7 +201,7 @@ def _create_default_memory():
 - 技术栈：[技术栈描述]
 
 ## 状态机 [Strict]
-- **当前指针**：`MEMORY_TASKS/YYYYMMDD-HHMMSS_task.md`
+- **当前指针**：`.moss-mem/tasks/YYYYMMDD-HHMMSS_task.md`
 - **全局目标**：[本阶段核心交付物]
 - **最后状态**：[🔧 进行中 | ✅ 完成 | ❌ 错误 | ⚠️ 警告]
 - **最后动作**：[最近一次操作描述]
@@ -435,6 +441,837 @@ def cmd_recover():
     print("  moss-mem update -d 'recovered context' -n '<next step>' -s '🔧'")
     print("to fill in the task file with recovery information.")
 
+
+# ---------------------------------------------------------------------------
+# Harness knowledge layer commands
+# ---------------------------------------------------------------------------
+
+ROOT_KNOWLEDGE_TEMPLATES = {
+    "AGENTS.md": """# AGENTS.md
+
+> Agent startup map for this repository. Keep this file short; point to deeper docs instead of copying them here.
+
+## Startup Order
+1. Read `MEMORY.md` for current task state.
+2. Read `ARCHITECTURE.md` for the system map.
+3. Read `docs/index.md` and only open docs relevant to the task.
+4. Use `.moss-mem/tasks/` for active task handoff state.
+5. Use `.moss-mem/summaries/` for imported harness/session summaries.
+
+## Memory Rules
+- `MEMORY.md` stays under 80 lines and stores only the current pointer, last action, and next step.
+- Long-lived project knowledge belongs in `docs/`.
+- `.moss-mem/` stores runtime state, not durable project doctrine.
+- MemPalace is an index/search layer; files remain the system of record.
+
+---
+_Last updated: {timestamp}_
+""",
+    "ARCHITECTURE.md": """# Architecture
+
+> High-level system map for agent navigation. Keep details in `docs/` and link to them here.
+
+## System Map
+| Area | Responsibility | Deeper Docs |
+|------|----------------|-------------|
+| Product | User goals, workflows, scope boundaries | `docs/product-specs/index.md`, `docs/PRODUCT_SENSE.md` |
+| Design | UX principles, visual system, interaction patterns | `docs/DESIGN.md`, `docs/design-docs/index.md` |
+| Frontend | UI architecture, state, routing, data fetching | `docs/FRONTEND.md` |
+| Reliability | Error handling, recovery, observability | `docs/RELIABILITY.md` |
+| Security | Auth, permissions, data protection | `docs/SECURITY.md` |
+| Plans | Active/completed execution plans and debt | `docs/PLANS.md`, `docs/exec-plans/` |
+
+## Module Boundaries
+| Module | Owns | Does Not Own |
+|--------|------|--------------|
+| [module] | [responsibility] | [excluded responsibility] |
+
+## Key Architectural Decisions
+| Date | Decision | Rationale | Reference |
+|------|----------|-----------|-----------|
+| {date} | Initialize architecture map | Give agents a stable routing layer before reading deep docs | `docs/index.md` |
+
+## Update Rule
+When a design decision changes module boundaries or system behavior, update this file and the relevant `docs/` page in the same task.
+
+---
+_Last updated: {timestamp}_
+""",
+}
+
+DOCS_KNOWLEDGE_TEMPLATES = {
+    "docs/design-docs/index.md": """# Design Docs Index
+
+> Map of durable design decisions, principles, and design explorations.
+
+## Core Files
+- `core-beliefs.md` — enduring design and product principles.
+
+## Design Docs
+| Doc | Status | Why It Exists |
+|-----|--------|---------------|
+| `core-beliefs.md` | Active | Shared principles for future product/design decisions |
+
+## Update Rule
+Add a design doc when the project makes a reusable product/design decision that future agents should not rediscover.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/design-docs/core-beliefs.md": """# Core Beliefs
+
+> Enduring project beliefs. These should be few, concrete, and defended by rationale.
+
+## Beliefs
+| Belief | Rationale | Implication |
+|--------|-----------|-------------|
+| Keep startup context short | Agents perform better with a map plus focused docs than with one giant prompt | `MEMORY.md` and `AGENTS.md` stay short |
+| Files are the system of record | Search indexes can drift or be unavailable | Durable knowledge lives in `docs/` |
+| Summaries are evidence, not truth | Harness summaries compress context and can omit details | Link summaries back to files/tasks when possible |
+
+## Anti-Patterns
+- **Prompt landfill**: adding long explanations to startup files instead of linking to focused docs.
+- **Index-only memory**: storing important decisions only in MemPalace without a file copy.
+- **Unowned debt**: noting a problem without severity, owner, or resolution path.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/exec-plans/tech-debt-tracker.md": """# Technical Debt Tracker
+
+> Known debt that should not be fixed inside the current task without explicit scope.
+
+## Active Debt
+| ID | Area | Description | Severity | Since | Resolution Plan |
+|----|------|-------------|----------|-------|-----------------|
+| TD-001 | docs | Replace scaffold examples with project-specific knowledge | Medium | {date} | Update as real decisions are made |
+
+## Resolved Debt
+| ID | Area | Description | Resolved | Fix Summary |
+|----|------|-------------|----------|-------------|
+| — | — | — | — | — |
+
+## Rules
+- Add debt here when it affects future work but is outside the current task.
+- Do not hide debt in task scratchpads only.
+- Close debt by moving it to Resolved Debt with a fix summary.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/generated/db-schema.md": """# Generated Database Schema
+
+> Generated or copied schema reference for agents. Regenerate from the source database/tooling; do not hand-edit generated sections.
+
+## Source
+- Generator: [record command here]
+- Last generated: {timestamp}
+
+## Schema
+```text
+[Paste or generate schema here]
+```
+
+## Update Rule
+If schema changes, regenerate this file and run `moss-mem knowledge-index`.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/product-specs/index.md": """# Product Specs Index
+
+> Product requirements, user workflows, and scope boundaries.
+
+## Specs
+| Spec | Status | Summary |
+|------|--------|---------|
+| `new-user-onboarding.md` | Example | Replace with the first real product spec when needed |
+
+## Spec Template
+```markdown
+# <Feature Name>
+
+## User Problem
+## Goals
+## Non-Goals
+## User Flow
+## Acceptance Criteria
+## Open Questions
+```
+
+## Update Rule
+Create or update a product spec before implementing behavior that changes user-facing scope.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/references/README.md": """# References for LLMs
+
+> Dense reference files optimized for agent retrieval. Use `*-llms.txt` for compact conventions, gotchas, and command examples.
+
+## Reference Format
+```markdown
+# <Topic> Reference for LLMs
+
+## Key Concepts
+- <concept>: <one-line definition>
+
+## Commands
+- `<command>` — <effect>
+
+## Conventions
+- Always <rule>
+- Never <risk>
+
+## Gotchas
+- <surprising behavior>
+
+## Related Files
+- `path/to/file` — <why relevant>
+```
+
+## Existing References
+- `design-system-reference-llms.txt`
+- `nixpacks-llms.txt`
+- `uv-llms.txt`
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/references/design-system-reference-llms.txt": """# Design System Reference for LLMs
+
+## Key Concepts
+- Design tokens: named color, spacing, radius, typography, and motion values.
+- Component contract: public props, states, accessibility expectations, and visual variants.
+
+## Conventions
+- Prefer existing components and tokens before creating new ones.
+- Document new reusable patterns in `docs/DESIGN.md`.
+
+## Gotchas
+- Do not infer visual rules from one-off pages.
+- Do not add a new token without recording why it exists.
+
+## Related Files
+- `docs/DESIGN.md` — design principles and reusable UI patterns.
+- `docs/FRONTEND.md` — frontend implementation conventions.
+""",
+    "docs/references/nixpacks-llms.txt": """# Nixpacks Reference for LLMs
+
+## Key Concepts
+- Nixpacks: buildpack-style deployment detection and build plan generation.
+- Providers: language/framework detectors that decide install/build/start commands.
+
+## Commands
+- `nixpacks plan .` — inspect detected build plan.
+- `nixpacks build .` — build an image from the detected plan.
+
+## Conventions
+- Record deployment-specific overrides in `docs/RELIABILITY.md`.
+- Prefer explicit project config when auto-detection is ambiguous.
+
+## Gotchas
+- Auto-detection can pick the wrong package manager in mixed repositories.
+- Build-time environment variables may differ from runtime variables.
+""",
+    "docs/references/uv-llms.txt": """# uv Reference for LLMs
+
+## Key Concepts
+- uv: fast Python package and environment manager.
+- `uv.lock`: lockfile for reproducible Python dependencies.
+
+## Commands
+- `uv sync` — install locked dependencies.
+- `uv run <cmd>` — run a command inside the managed environment.
+- `uv add <pkg>` — add a dependency and update project metadata.
+
+## Conventions
+- Do not add dependencies without approval.
+- Prefer `uv run` for project commands when the repo uses uv.
+
+## Gotchas
+- `uv run` may create or update environments outside the repo cache.
+- Mixed pip/uv installs can hide dependency drift.
+""",
+    "docs/DESIGN.md": """# Design
+
+> User experience principles, interaction patterns, and reusable visual decisions.
+
+## Principles
+- [Principle]: [rationale and implication]
+
+## Patterns
+| Pattern | Use When | Avoid When |
+|---------|----------|------------|
+| [pattern] | [context] | [counterexample] |
+
+## Accessibility
+- Record keyboard, screen reader, contrast, and motion requirements here.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/FRONTEND.md": """# Frontend
+
+> Frontend architecture, UI state, routing, data fetching, and testing conventions.
+
+## Stack
+| Concern | Choice | Notes |
+|---------|--------|-------|
+| Framework | [framework] | [notes] |
+| Styling | [approach] | [notes] |
+| Testing | [tooling] | [notes] |
+
+## Conventions
+- [convention]
+
+## Gotchas
+- [gotcha]
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/PLANS.md": """# Plans
+
+> Navigation for execution plans and planning rules.
+
+## Active Plans
+- `docs/exec-plans/active/` — plans currently being executed.
+
+## Completed Plans
+- `docs/exec-plans/completed/` — finished plans retained for audit and reuse.
+
+## Debt
+- `docs/exec-plans/tech-debt-tracker.md` — known debt outside current scope.
+
+## Rules
+- Put multi-step implementation plans in `docs/exec-plans/active/`.
+- Move completed plans to `docs/exec-plans/completed/` after verification.
+- Update `MEMORY.md` with the active plan pointer when execution starts.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/PRODUCT_SENSE.md": """# Product Sense
+
+> Product judgment, target users, scope boundaries, and user-value heuristics.
+
+## Target Users
+| User | Need | Success Signal |
+|------|------|----------------|
+| [user] | [need] | [signal] |
+
+## Product Heuristics
+- [heuristic]: [why it matters]
+
+## Non-Goals
+- [non-goal]
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/QUALITY_SCORE.md": """# Quality Score
+
+> Project-specific quality rubric for reviews and releases.
+
+## Rubric
+| Dimension | Standard | Evidence |
+|-----------|----------|----------|
+| Correctness | Behavior matches specs and tests | Test output, review notes |
+| Maintainability | Changes are small and documented | Diff, architecture docs |
+| Reliability | Failure modes are handled | Error tests, runbooks |
+| Security | Sensitive flows follow policy | Security review, docs |
+
+## Review Rule
+Before declaring work complete, record the verification commands and outcomes in the task handoff or summary.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/RELIABILITY.md": """# Reliability
+
+> Error handling, retries, recovery, observability, and operational safety.
+
+## Failure Modes
+| Failure | Detection | Recovery | Owner |
+|---------|-----------|----------|-------|
+| [failure] | [signal] | [action] | [owner] |
+
+## Conventions
+- Prefer explicit failure handling over silent fallback.
+- Record recurring reliability issues in `docs/exec-plans/tech-debt-tracker.md`.
+
+---
+_Last updated: {timestamp}_
+""",
+    "docs/SECURITY.md": """# Security
+
+> Authentication, authorization, data handling, secrets, and threat model.
+
+## Security Model
+| Area | Rule | Rationale |
+|------|------|-----------|
+| Secrets | Never commit secrets | Repository history is durable |
+| Permissions | Least privilege | Limits blast radius |
+
+## Sensitive Data
+- Record PII, secrets, tokens, credentials, and audit requirements here.
+
+## Review Triggers
+- Auth changes
+- Permission model changes
+- New external integrations
+- Logging changes involving user data
+
+---
+_Last updated: {timestamp}_
+""",
+}
+
+DOMAIN_REFERENCE_TEMPLATES = {
+    "web": {},
+    "mobile": {
+        "docs/references/mobile-platform-llms.txt": """# Mobile Platform Reference for LLMs
+
+## Key Concepts
+- Platform storage: secure storage/keychain for secrets and credentials.
+- Offline-first: local state remains usable during network loss.
+
+## Gotchas
+- Background execution limits differ by platform.
+- Network state can change between user action and API response.
+""",
+    },
+    "api": {
+        "docs/references/api-conventions-llms.txt": """# API Conventions Reference for LLMs
+
+## Key Concepts
+- Idempotency: retries must not duplicate side effects.
+- Pagination: list endpoints must define cursor or page semantics.
+
+## Conventions
+- Document error response shapes in `docs/RELIABILITY.md`.
+- Record auth and permission rules in `docs/SECURITY.md`.
+""",
+    },
+    "cli": {
+        "docs/references/cli-conventions-llms.txt": """# CLI Conventions Reference for LLMs
+
+## Key Concepts
+- Exit code: machine-readable success/failure signal.
+- Stdout/stderr split: data to stdout, diagnostics to stderr.
+
+## Conventions
+- Keep command output scriptable.
+- Document destructive commands and confirmation requirements.
+""",
+    },
+}
+
+
+def _extract_doc_info(filepath: Path) -> dict:
+    """Extract the first H1 and short description from a markdown file."""
+    info = {"title": filepath.stem, "description": ""}
+    try:
+        content = filepath.read_text()
+    except Exception:
+        return info
+
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("# ") or stripped.startswith("## "):
+            continue
+        info["title"] = stripped[2:].strip()
+        desc_parts = []
+        for next_line in lines[i + 1:i + 15]:
+            next_line = next_line.strip()
+            if not next_line:
+                if desc_parts:
+                    break
+                continue
+            if next_line.startswith("## ") or next_line.startswith("---"):
+                break
+            if next_line.startswith("> "):
+                desc_parts.append(next_line[2:].strip())
+            elif next_line.startswith(">"):
+                desc_parts.append(next_line[1:].strip())
+            elif not next_line.startswith("#") and not next_line.startswith("<!--"):
+                desc_parts.append(next_line)
+                break
+            elif desc_parts:
+                break
+        if desc_parts:
+            desc = " ".join(desc_parts)
+            info["description"] = desc[:100] + ("..." if len(desc) > 100 else "")
+        break
+    return info
+
+
+def _write_template_file(filepath: Path, template: str, timestamp: str, created: list, skipped: list):
+    """Create a templated file if missing. Existing files are never overwritten."""
+    if filepath.exists():
+        skipped.append(str(filepath))
+        return
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    content = template.replace("{timestamp}", timestamp).replace("{date}", timestamp.split()[0])
+    with open(filepath, "w") as f:
+        f.write(content)
+    created.append(str(filepath))
+
+
+def _touch_gitkeep(directory: Path, created: list, skipped: list):
+    """Ensure a directory exists and is retained by git when empty."""
+    directory.mkdir(parents=True, exist_ok=True)
+    gitkeep = directory / ".gitkeep"
+    if gitkeep.exists():
+        skipped.append(str(gitkeep))
+    else:
+        gitkeep.write_text("")
+        created.append(str(gitkeep))
+
+
+def _docs_index_link(path: str) -> str:
+    """Return a link target from docs/index.md to a project-root-relative path."""
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("docs/"):
+        return normalized[len("docs/"):]
+    return "../" + normalized
+
+
+def _collect_index_file(filepath: Path) -> dict:
+    stat = filepath.stat()
+    info = _extract_doc_info(filepath)
+    rel_path = str(filepath).replace("\\", "/")
+    return {
+        "path": rel_path,
+        "link": _docs_index_link(rel_path),
+        "title": info["title"],
+        "description": info["description"],
+        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def cmd_knowledge_init(domain: str = None):
+    """Scaffold Harness-style docs/ knowledge base plus .moss-mem runtime dirs."""
+    docs_dir = Path("docs")
+    moss_dir = Path(MOSS_DIR)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    created = []
+    skipped = []
+
+    moss_dir.mkdir(parents=True, exist_ok=True)
+    for runtime_dir in [Path(TASKS_DIR), Path(SUMMARIES_DIR), Path(INDEX_CACHE_DIR)]:
+        _touch_gitkeep(runtime_dir, created, skipped)
+
+    for plan_dir in [docs_dir / "exec-plans" / "active", docs_dir / "exec-plans" / "completed"]:
+        _touch_gitkeep(plan_dir, created, skipped)
+
+    for filename, template in ROOT_KNOWLEDGE_TEMPLATES.items():
+        _write_template_file(Path(filename), template, timestamp, created, skipped)
+
+    for filename, template in DOCS_KNOWLEDGE_TEMPLATES.items():
+        _write_template_file(Path(filename), template, timestamp, created, skipped)
+
+    if domain and domain in DOMAIN_REFERENCE_TEMPLATES:
+        for filename, template in DOMAIN_REFERENCE_TEMPLATES[domain].items():
+            _write_template_file(Path(filename), template, timestamp, created, skipped)
+
+    cmd_knowledge_index()
+
+    if created:
+        print(f"\n📄 Created {len(created)} file(s):")
+        for f in created:
+            print(f"   • {f}")
+    if skipped:
+        print(f"\n⏭️  Skipped {len(skipped)} existing file(s):")
+        for f in skipped:
+            print(f"   • {f}")
+
+    print("\n💡 Next: edit ARCHITECTURE.md, docs/design-docs/core-beliefs.md, and docs/index.md with project specifics.")
+
+
+def cmd_knowledge_index():
+    """Regenerate docs/index.md from the Harness-style docs tree."""
+    docs_dir = Path("docs")
+    if not docs_dir.exists():
+        print("[ERROR] docs/ directory not found. Run 'moss-mem knowledge-init' first.")
+        sys.exit(1)
+
+    md_files = []
+    root_docs = [Path("AGENTS.md"), Path("ARCHITECTURE.md")]
+    for md in root_docs:
+        if md.exists():
+            md_files.append(_collect_index_file(md))
+
+    for md in sorted(docs_dir.rglob("*.md")):
+        if md == docs_dir / "index.md":
+            continue
+        md_files.append(_collect_index_file(md))
+
+    txt_files = []
+    refs_dir = docs_dir / "references"
+    if refs_dir.exists():
+        for txt in sorted(refs_dir.rglob("*.txt")):
+            rel_path = str(txt).replace("\\", "/")
+            stat = txt.stat()
+            txt_files.append({
+                "path": rel_path,
+                "link": _docs_index_link(rel_path),
+                "title": txt.stem.replace("-llms", "").replace("-", " ").title(),
+                "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            })
+
+    entry_docs = [f for f in md_files if f["path"] in {"AGENTS.md", "ARCHITECTURE.md"}]
+    design_docs = [f for f in md_files if f["path"].startswith("docs/design-docs/") or f["path"] == "docs/DESIGN.md"]
+    product_specs = [f for f in md_files if f["path"].startswith("docs/product-specs/") or f["path"] == "docs/PRODUCT_SENSE.md"]
+    exec_plans = [f for f in md_files if f["path"].startswith("docs/exec-plans/") or f["path"] in {"docs/PLANS.md", "docs/QUALITY_SCORE.md"}]
+    generated = [f for f in md_files if f["path"].startswith("docs/generated/")]
+    operating_docs = [f for f in md_files if f["path"] in {"docs/FRONTEND.md", "docs/RELIABILITY.md", "docs/SECURITY.md"}]
+    categorized = entry_docs + design_docs + product_specs + exec_plans + generated + operating_docs
+    other_docs = [f for f in md_files if f not in categorized]
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        "# Knowledge Index",
+        "",
+        "> Auto-generated map of the Harness-style project knowledge base.",
+        "> Regenerate: `moss-mem knowledge-index`",
+        f"> Generated: {timestamp}",
+        "",
+    ]
+
+    def add_section(title, files, empty):
+        lines.append(f"## {title}")
+        if files:
+            for f in files:
+                desc = f" — {f['description']}" if f.get("description") else ""
+                lines.append(f"- [{f['title']}]({f['link']}){desc} _(updated {f['mtime']})_")
+        else:
+            lines.append(f"- _{empty}_")
+        lines.append("")
+
+    add_section("Entry Points", entry_docs, "No root entry docs found.")
+    add_section("Design Docs", design_docs, "No design docs found.")
+    add_section("Product Specs", product_specs, "No product specs found.")
+    add_section("Execution Plans", exec_plans, "No execution plans found.")
+    add_section("Generated Docs", generated, "No generated docs found.")
+    add_section("Operating Docs", operating_docs, "No operating docs found.")
+
+    lines.append("## LLM References")
+    if txt_files:
+        for f in txt_files:
+            lines.append(f"- [{f['title']}]({f['link']}) _(updated {f['mtime']})_")
+    else:
+        lines.append("- _No LLM references found._")
+    lines.append("")
+
+    if other_docs:
+        add_section("Other Docs", other_docs, "No other docs found.")
+
+    lines.append("## Runtime State")
+    lines.append("- `.moss-mem/tasks/` — active and archived task handoff files; not indexed as durable knowledge.")
+    lines.append("- `.moss-mem/summaries/` — imported harness/session summaries; mine into MemPalace for search.")
+    lines.append("- `.moss-mem/index-cache/` — generated cache files; not a system of record.")
+    lines.append("")
+    lines.append("---")
+    lines.append(f"_Last regenerated: {timestamp}_")
+
+    index_path = docs_dir / "index.md"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text("\n".join(lines) + "\n")
+
+    total = len(md_files) + len(txt_files)
+    print(f"✅ docs/index.md regenerated ({total} docs indexed)")
+    print(f"   Entry: {len(entry_docs)}  Design: {len(design_docs)}  Product: {len(product_specs)}  "
+          f"Plans: {len(exec_plans)}  Generated: {len(generated)}  Refs: {len(txt_files)}")
+
+
+REQUIRED_HARNESS_PATHS = [
+    ("AGENTS.md", "file"),
+    ("ARCHITECTURE.md", "file"),
+    ("docs", "dir"),
+    ("docs/index.md", "file"),
+    ("docs/design-docs/index.md", "file"),
+    ("docs/design-docs/core-beliefs.md", "file"),
+    ("docs/exec-plans/active", "dir"),
+    ("docs/exec-plans/completed", "dir"),
+    ("docs/exec-plans/tech-debt-tracker.md", "file"),
+    ("docs/generated/db-schema.md", "file"),
+    ("docs/product-specs/index.md", "file"),
+    ("docs/references/README.md", "file"),
+    ("docs/DESIGN.md", "file"),
+    ("docs/FRONTEND.md", "file"),
+    ("docs/PLANS.md", "file"),
+    ("docs/PRODUCT_SENSE.md", "file"),
+    ("docs/QUALITY_SCORE.md", "file"),
+    ("docs/RELIABILITY.md", "file"),
+    ("docs/SECURITY.md", "file"),
+    (TASKS_DIR, "dir"),
+    (SUMMARIES_DIR, "dir"),
+    (INDEX_CACHE_DIR, "dir"),
+]
+
+
+PLACEHOLDER_MARKERS = [
+    "[module]", "[responsibility]", "[excluded responsibility]",
+    "[record command here]", "[Paste or generate schema here]",
+    "[Feature Name]", "[Principle]", "[rationale", "[implication]",
+    "[framework]", "[approach]", "[tooling]", "[notes]",
+    "[user]", "[need]", "[signal]", "[heuristic]", "[non-goal]",
+    "[failure]", "[owner]",
+]
+
+
+def _knowledge_source_files():
+    """Files that feed docs/index.md freshness checks."""
+    sources = []
+    for root_doc in [Path("AGENTS.md"), Path("ARCHITECTURE.md")]:
+        if root_doc.exists():
+            sources.append(root_doc)
+
+    docs_dir = Path("docs")
+    if docs_dir.exists():
+        for path in sorted(docs_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            if path == docs_dir / "index.md":
+                continue
+            if path.name == ".gitkeep":
+                continue
+            if path.suffix.lower() in {".md", ".txt"}:
+                sources.append(path)
+    return sources
+
+
+def _scan_placeholder_markers(files):
+    hits = []
+    for path in files:
+        try:
+            content = path.read_text()
+        except Exception:
+            continue
+        for marker in PLACEHOLDER_MARKERS:
+            if marker in content:
+                hits.append((path, marker))
+                break
+    return hits
+
+
+def cmd_knowledge_check(strict: bool = False):
+    """Validate Harness docs structure and docs/index.md freshness."""
+    errors = []
+    warnings = []
+
+    for raw_path, kind in REQUIRED_HARNESS_PATHS:
+        path = Path(raw_path)
+        if kind == "file" and not path.is_file():
+            errors.append(f"missing file: {raw_path}")
+        elif kind == "dir" and not path.is_dir():
+            errors.append(f"missing directory: {raw_path}")
+
+    index_path = Path("docs/index.md")
+    sources = _knowledge_source_files()
+    if index_path.exists() and sources:
+        index_mtime = index_path.stat().st_mtime_ns
+        newer_sources = [p for p in sources if p.stat().st_mtime_ns > index_mtime]
+        if newer_sources:
+            newest = max(newer_sources, key=lambda p: p.stat().st_mtime_ns)
+            errors.append(f"docs/index.md is stale; newer source: {newest}")
+        else:
+            print("✅ docs/index.md is fresh")
+    elif not index_path.exists():
+        errors.append("docs/index.md is missing")
+
+    placeholder_hits = _scan_placeholder_markers(sources)
+    if placeholder_hits:
+        preview = ", ".join(f"{path}:{marker}" for path, marker in placeholder_hits[:5])
+        warning = f"placeholder markers remain ({len(placeholder_hits)}): {preview}"
+        if strict:
+            errors.append(warning)
+        else:
+            warnings.append(warning)
+
+    for warning in warnings:
+        print(f"⚠️  {warning}")
+
+    if errors:
+        print("❌ Knowledge check failed")
+        for error in errors:
+            print(f"- {error}")
+        print(f"Run: python3 {SCRIPT_DIR / 'memory_manager.py'} knowledge-index")
+        sys.exit(1)
+
+    print("✅ Knowledge check passed")
+
+
+def _slugify_topic(topic: str) -> str:
+    cleaned = []
+    for ch in topic.lower():
+        if ch.isascii() and ch.isalnum():
+            cleaned.append(ch)
+        elif ch in {" ", "-", "_", "."}:
+            cleaned.append("-")
+    slug = "".join(cleaned).strip("-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug[:80] or "summary"
+
+
+def _yaml_scalar(value: str) -> str:
+    """Return a conservative double-quoted YAML scalar."""
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decisions: str = "", next_step: str = "", related: str = ""):
+    """Capture a harness/session summary into .moss-mem/summaries/."""
+    Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    filename_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    slug = _slugify_topic(topic)
+    summary_path = Path(SUMMARIES_DIR) / f"{filename_ts}-{slug}.md"
+
+    related_lines = []
+    for item in related.split(","):
+        item = item.strip()
+        if item:
+            related_lines.append(f"- `{item}`")
+    if not related_lines:
+        related_lines.append("- <!-- none -->")
+
+    content = "\n".join([
+        "---",
+        f"topic: {_yaml_scalar(topic)}",
+        f"source: {_yaml_scalar(source)}",
+        f"created: {_yaml_scalar(timestamp)}",
+        "type: harness-summary",
+        "---",
+        "",
+        f"# Harness Summary - {topic}",
+        "",
+        "## Source",
+        source,
+        "",
+        "## Summary",
+        summary,
+        "",
+        "## Decisions",
+        decisions if decisions else "<!-- none -->",
+        "",
+        "## Next Step",
+        next_step if next_step else "<!-- pending -->",
+        "",
+        "## Related Files",
+        *related_lines,
+        "",
+        "## MemPalace Sync",
+        f"Run: `mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>`",
+        "",
+    ])
+    summary_path.write_text(content)
+    print(f"✅ Harness summary captured: {summary_path}")
+    print("🔎 Next: mine `.moss-mem/summaries/` into MemPalace before handoff if MCP/CLI is available.")
 
 def _git_diff_summary():
     """Get summary of uncommitted changes."""
@@ -696,9 +1533,45 @@ def _append_to_archive(description: str):
 # Bootstrap / init
 # ---------------------------------------------------------------------------
 
+def _migrate_old_tasks_dir():
+    """Migrate legacy MEMORY_TASKS/ → .moss-mem/tasks/ if needed."""
+    old_path = Path(OLD_TASKS_DIR)
+    new_path = Path(TASKS_DIR)
+
+    if not old_path.exists() or not old_path.is_dir():
+        return
+
+    if new_path.exists():
+        print(f"⚠️  Both {OLD_TASKS_DIR}/ and {TASKS_DIR}/ exist — manual merge required.")
+        print(f"   Remove {OLD_TASKS_DIR}/ if {TASKS_DIR}/ is up to date.")
+        return
+
+    print(f"🔀 Migrating {OLD_TASKS_DIR}/ → {TASKS_DIR}/ ...")
+    new_path.parent.mkdir(exist_ok=True)
+    shutil.move(str(old_path), str(new_path))
+    print(f"✅ Migrated to {TASKS_DIR}/")
+
+    # Update MEMORY.md pointer if it references the old path
+    if Path(MEMORY_FILE).exists():
+        with open(MEMORY_FILE) as f:
+            content = f.read()
+        if OLD_TASKS_DIR in content:
+            content = content.replace(OLD_TASKS_DIR, TASKS_DIR)
+            with open(MEMORY_FILE, "w") as f:
+                f.write(content)
+            print(f"✅ Updated MEMORY.md pointers to {TASKS_DIR}/")
+
+
 def cmd_init():
-    """Initialize MEMORY.md and MEMORY_TASKS/ directory."""
+    """Initialize MEMORY.md and .moss-mem/tasks/ directory."""
+    # Ensure .moss-mem/ parent exists
+    Path(MOSS_DIR).mkdir(exist_ok=True)
+
+    # Migration: if old MEMORY_TASKS/ exists, move it BEFORE creating new dir
+    _migrate_old_tasks_dir()
+
     ensure_tasks_dir()
+
     archive_path = Path(TASKS_DIR) / ARCHIVE_FILE
     if not archive_path.exists():
         with open(archive_path, "w") as f:
@@ -751,7 +1624,7 @@ def main():
     parser = argparse.ArgumentParser(description="MOSS_MEM - Memory Management")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    subparsers.add_parser("init", help="Initialize MEMORY.md and MEMORY_TASKS/")
+    subparsers.add_parser("init", help="Initialize MEMORY.md and .moss-mem/tasks/")
 
     start_parser = subparsers.add_parser("start", help="Start a new task")
     start_parser.add_argument("--description", "-d", required=True, help="Task description")
@@ -780,7 +1653,22 @@ def main():
     check_parser.add_argument("--file", "-f", default=None, help="Specific task file to check (default: current pointer)")
     check_parser.add_argument("--fix", action="store_true", help="Auto-fill empty fields with git-derived content")
 
-    args = parser.parse_args()
+    knowledge_init_parser = subparsers.add_parser("knowledge-init", help="Scaffold Harness-style docs/ knowledge base")
+    knowledge_init_parser.add_argument("--domain", "-d", default=None, choices=["web", "mobile", "api", "cli"],
+                                       help="Domain type for additional templates")
+
+    subparsers.add_parser("knowledge-index", help="Regenerate docs/index.md from current docs/ tree")
+
+    knowledge_check_parser = subparsers.add_parser("knowledge-check", help="Validate Harness docs structure and docs/index.md freshness")
+    knowledge_check_parser.add_argument("--strict", action="store_true", help="Fail when scaffold placeholder markers remain")
+
+    summary_parser = subparsers.add_parser("summary-capture", help="Capture a harness/session summary into .moss-mem/summaries/")
+    summary_parser.add_argument("--topic", "-t", required=True, help="Short summary topic")
+    summary_parser.add_argument("--summary", "-s", required=True, help="Compressed session or harness summary")
+    summary_parser.add_argument("--source", default="harness", help="Summary source, e.g. codex-harness or session-stop")
+    summary_parser.add_argument("--decisions", default="", help="Key decisions captured in the summary")
+    summary_parser.add_argument("--next-step", "-n", default="", help="Next concrete step")
+    summary_parser.add_argument("--related", default="", help="Comma-separated related file paths")
 
     args = parser.parse_args()
 
@@ -803,6 +1691,14 @@ def main():
         cmd_recover()
     elif args.command == "check":
         cmd_check(getattr(args, 'file', None), getattr(args, 'fix', False))
+    elif args.command == "knowledge-init":
+        cmd_knowledge_init(getattr(args, 'domain', None))
+    elif args.command == "knowledge-index":
+        cmd_knowledge_index()
+    elif args.command == "knowledge-check":
+        cmd_knowledge_check(getattr(args, 'strict', False))
+    elif args.command == "summary-capture":
+        cmd_summary_capture(args.topic, args.summary, args.source, args.decisions, args.next_step, args.related)
     else:
         parser.print_help()
         sys.exit(1)
