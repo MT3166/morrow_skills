@@ -902,15 +902,7 @@ def _migrate_old_tasks_dir():
     print(f"   moss-mem will not move or delete it automatically.")
     print(f"   To migrate manually: mkdir -p {TASKS_DIR} && cp -R {OLD_TASKS_DIR}/. {TASKS_DIR}/")
 
-    # Update MEMORY.md pointer if it references the old path; MEMORY.md is the one root file moss-mem owns.
-    if Path(MEMORY_FILE).exists():
-        with open(MEMORY_FILE) as f:
-            content = f.read()
-        if OLD_TASKS_DIR in content:
-            content = content.replace(OLD_TASKS_DIR, TASKS_DIR)
-            with open(MEMORY_FILE, "w") as f:
-                f.write(content)
-            print(f"✅ Updated MEMORY.md pointers to {TASKS_DIR}/")
+    print(f"   MEMORY.md pointers to {OLD_TASKS_DIR}/ are left unchanged until you migrate files manually.")
 
 
 def cmd_init():

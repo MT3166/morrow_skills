@@ -20,7 +20,7 @@
   {
     "id": 4,
     "prompt": "现在要交接给下一个 Agent，请完成交接流程",
-    "expected": "依次执行 check → check --fix → update -l/-k/-m → diary write → complete → start，填写 Last Action / Key Decisions / Landmines 三个字段，写入 AAAK 格式日记",
+    "expected": "依次执行 check → check --fix → update -d 'Handoff fields filled' -n '<next step>' -s '🔧' -l/-k/-m → diary write → complete → start，填写 Last Action / Key Decisions / Landmines 三个字段，写入 AAAK 格式日记",
     "type": "handoff_protocol"
   },
   {

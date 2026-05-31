@@ -633,7 +633,7 @@ Step 2: moss-mem check --fix
               exit 0 → proceed to step 5
               exit 1 → continue to step 3
 
-Step 3: moss-mem update -l "..." -k "..." -m "..."
+Step 3: moss-mem update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l "..." -k "..." -m "..."
         Gate: moss-mem show — verify ## Last Action, ## Key Decisions, ## Landmines are not <!-- pending -->
               filled → proceed to step 4
               still pending → repeat step 3 with remaining fields
