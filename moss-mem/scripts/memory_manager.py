@@ -898,12 +898,11 @@ def _migrate_old_tasks_dir():
         print(f"   Remove {OLD_TASKS_DIR}/ if {TASKS_DIR}/ is up to date.")
         return
 
-    print(f"🔀 Migrating {OLD_TASKS_DIR}/ → {TASKS_DIR}/ ...")
-    new_path.parent.mkdir(exist_ok=True)
-    shutil.move(str(old_path), str(new_path))
-    print(f"✅ Migrated to {TASKS_DIR}/")
+    print(f"⚠️  Legacy {OLD_TASKS_DIR}/ exists outside moss-mem ownership.")
+    print(f"   moss-mem will not move or delete it automatically.")
+    print(f"   To migrate manually: mkdir -p {TASKS_DIR} && cp -R {OLD_TASKS_DIR}/. {TASKS_DIR}/")
 
-    # Update MEMORY.md pointer if it references the old path
+    # Update MEMORY.md pointer if it references the old path; MEMORY.md is the one root file moss-mem owns.
     if Path(MEMORY_FILE).exists():
         with open(MEMORY_FILE) as f:
             content = f.read()

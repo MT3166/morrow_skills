@@ -169,7 +169,7 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   → Mine summaries with: mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
 
 "record decision" / "capture belief"
-  python3 {base}/scripts/memory_manager.py update -k "<decision>"
+  python3 {base}/scripts/memory_manager.py update -d "Recorded decision" -n "<next step>" -s "🔧" -k "<decision>"
   → Stores moss-mem state in MEMORY.md and .moss-mem/ only
   → If a separate project documentation system exists, treat it as external and follow explicit user/project instructions outside moss-mem
 ```
@@ -318,7 +318,7 @@ Handoff fields:
 | Flag | Omitted | `""` (empty) | Non-empty |
 |------|---------|--------------|-----------|
 | `-l` | Leave unchanged | → `<!-- pending -->` | Replace |
-| `-k` | Leave unchanged | → `<!-- none -->` | Replace |
+| `-k` | Leave unchanged | → `<!-- pending -->` | Replace |
 | `-m` | Leave unchanged | → `<!-- none -->` | Replace |
 
 Enhanced (MCP): when `-k`/`-m` non-empty → `mempalace_add_drawer room:decisions` / `room:landmines` + `mempalace_kg_add` with `valid_from` timestamp. Skip on failure.
