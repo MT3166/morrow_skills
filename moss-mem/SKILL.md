@@ -495,14 +495,17 @@ These run when MCP is unavailable, or for maintenance operations that have no MC
 ### mine — Bulk ingest into palace
 
 ```
-# Mine project source
-mempalace mine <project_dir> --wing <project>
+# Mine moss-mem memory store only
+mempalace mine .moss-mem/ --wing <project>
 
 # Mine task files with auto-classification → decisions / milestones / problems
 mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>
 
+# Mine session summaries
+mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
+
 # Preview
-mempalace mine .moss-mem/tasks/ --wing <project> --dry-run
+mempalace mine .moss-mem/ --wing <project> --dry-run
 ```
 
 Auto-classification (`--mode convos --extract general`) extracts into rooms: `decisions`, `milestones`, `problems`. Use this when MCP mirroring was skipped (e.g., long CLI-fallback session) to batch-sync file state into palace.
@@ -683,9 +686,9 @@ python3 {base}/scripts/memory_manager.py knowledge-init [--domain web|mobile|api
 # 3. Install MemPalace
 pip install mempalace
 
-# 4. Initialize and populate palace
+# 4. Initialize palace and mine moss-mem memory only
 mempalace init <project_dir> --yes
-mempalace mine <project_dir> --wing <project_name>
+mempalace mine .moss-mem/ --wing <project_name>
 
 # 5. Register MCP server with the active coding runtime when MCP is available
 # Example: claude mcp add mempalace -- mempalace-mcp
