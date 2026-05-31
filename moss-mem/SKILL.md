@@ -179,7 +179,7 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
 - Python 3.8+ (stdlib only). Run from **project root** (where MEMORY.md lives).
 - Script: `{base}/scripts/memory_manager.py` — `{base}` is the `Base directory for this skill:` line in invocation header.
 - After `kill -9`: `rm .moss-mem/tasks/.edit_lock`.
-- **MemPalace MCP** (primary): installed via `pip install mempalace`, initialized via `mempalace init <dir> --yes && mempalace mine <dir> --wing <project>`, then registered with the active coding runtime's MCP configuration.
+- **MemPalace MCP** (primary): installed via `pip install mempalace`, initialized via `mempalace init <project_dir> --yes && mempalace mine .moss-mem/ --wing <project>`, then registered with the active coding runtime's MCP configuration. Mine only moss-mem memory paths unless the user explicitly asks to index external project docs.
 - **MemPalace CLI** (fallback): same binary — `mempalace --version` confirms availability.
 
 ### Authoritative References
