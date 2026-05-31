@@ -55,8 +55,8 @@
   },
   {
     "id": 10,
-    "prompt": "按 OpenAI harness engineering 的结构初始化项目知识库，项目是一个 web 应用",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py knowledge-init --domain web；生成 AGENTS.md、ARCHITECTURE.md、docs/index.md、docs/design-docs/core-beliefs.md、docs/exec-plans/{active,completed}/、docs/references/*-llms.txt、.moss-mem/summaries/，且不把长期知识写进 .moss-mem/core-beliefs.md",
+    "prompt": "按 memory-only scope 初始化 moss-mem，项目是一个 web 应用",
+    "expected": "使用 {base_dir}/scripts/memory_manager.py knowledge-init --domain web；只生成 MEMORY.md、.moss-mem/tasks/、.moss-mem/summaries/、.moss-mem/index-cache/；明确不创建 AGENTS.md、ARCHITECTURE.md 或 docs/",
     "type": "harness_knowledge_init"
   },
   {
@@ -67,14 +67,14 @@
   },
   {
     "id": 12,
-    "prompt": "我新增了 docs/product-specs/new-user-onboarding.md，帮我刷新知识索引并说明 MemPalace 该怎么同步",
-    "expected": "运行 knowledge-index 生成 docs/index.md；说明 docs/ 是 system of record，随后运行 mempalace mine docs/ --wing <project> 让 MemPalace 更新检索索引",
+    "prompt": "我新增了一条 session summary，帮我刷新 moss-mem memory index 并说明 MemPalace 该怎么同步",
+    "expected": "运行 knowledge-index 生成 .moss-mem/index-cache/memory-index.md；随后运行 mempalace mine .moss-mem/ --wing <project>，或更精确地 mine .moss-mem/tasks/ 与 .moss-mem/summaries/ 让 MemPalace 同步 moss-mem 记忆",
     "type": "harness_knowledge_index"
   },
   {
     "id": 13,
-    "prompt": "检查 docs/index.md 是否还是最新；如果我刚改过 docs/DESIGN.md，需要告诉我怎么修复",
-    "expected": "运行 python3 {base_dir}/scripts/memory_manager.py knowledge-check；若输出 docs/index.md is stale，则提示运行 knowledge-index 后重跑 knowledge-check；不要直接手改 docs/index.md",
+    "prompt": "检查 moss-mem memory layout 和 memory index 是否还是最新；如果我刚更新过任务或 summary，需要告诉我怎么修复",
+    "expected": "运行 python3 {base_dir}/scripts/memory_manager.py knowledge-check 验证 MEMORY.md 与 .moss-mem/{tasks,summaries,index-cache}/；若提示 .moss-mem/index-cache/memory-index.md stale，则运行 knowledge-index 后重跑 knowledge-check；不要把手改生成的 memory-index 当作 doctrine",
     "type": "harness_knowledge_check"
   }
 ]
