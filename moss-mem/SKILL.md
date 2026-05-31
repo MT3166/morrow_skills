@@ -1,12 +1,11 @@
 ---
 name: moss-mem
 description: >-
-  Harness-style project memory for coding-agent sessions:
-  MEMORY.md (startup state) → docs/ (durable knowledge system of record)
-  → .moss-mem/ (runtime tasks + harness summaries) → MemPalace MCP/CLI
-  (semantic search, temporal KG, diary, wake-up, mine, repair). Degrades gracefully when MCP/CLI
-  unavailable. Triggers: task lifecycle, memory ops, search, link, diary,
-  handoff, wake-up.
+  Two-layer project memory for coding-agent sessions:
+  MEMORY.md (startup state) + .moss-mem/ (tasks, summaries, index cache),
+  with optional MemPalace MCP/CLI for semantic search, temporal KG, diary,
+  wake-up, mine, and repair. Degrades gracefully when MCP/CLI unavailable.
+  Triggers: task lifecycle, memory ops, search, link, diary, handoff, wake-up.
 triggers:
   # ── Task lifecycle ──
   - start task
@@ -65,23 +64,20 @@ triggers:
   - wake up
   - 唤醒
 
-  # ── Knowledge domain management ──
+  # ── Memory layout management ──
   - knowledge init
   - init knowledge
-  - scaffold docs
-  - 初始化知识库
-  - 搭建文档结构
+  - memory layout
+  - 初始化记忆布局
   - knowledge index
-  - regenerate index
+  - regenerate memory index
   - knowledge check
-  - check knowledge
-  - 生成知识索引
-  - 检查知识库
-  - add reference
+  - check memory layout
+  - 生成记忆索引
+  - 检查记忆布局
   - capture belief
   - record decision
-  - 记录架构决策
-  - 添加参考文档
+  - 记录决策
 version: "3.3"
 ---
 
@@ -89,21 +85,20 @@ version: "3.3"
 
 ## TL;DR
 
-Four-layer memory: **MEMORY.md** as the always-available startup state → **root entry docs** (`AGENTS.md`, `ARCHITECTURE.md`) as navigation → **docs/** as the durable Harness-style knowledge system of record → **.moss-mem/** as runtime task/summary state → **MemPalace MCP/CLI** as search, KG, diary, wake-up, mine, and repair. When MCP is unavailable, degrade to CLI. When both are unavailable, use files only. Never block the task lifecycle.
+Two-layer memory: **MEMORY.md** as the always-available startup state + **.moss-mem/** as the project-local memory store. MemPalace MCP/CLI can index, search, and mirror those files, but moss-mem never depends on MemPalace availability. `AGENTS.md` and project docs are external read-only context when present; moss-mem does not create or manage them.
 
 ```
-Startup Layer                 Durable Knowledge (system of record)       Runtime + Index Layer
-  MEMORY.md ← current pointer   AGENTS.md ← agent startup map              .moss-mem/tasks/ ← task handoff
-  memory_manager.py             ARCHITECTURE.md ← system map               .moss-mem/summaries/ ← harness summaries
-                                docs/index.md ← generated map              .moss-mem/index-cache/ ← generated cache
-                                docs/design-docs/ ← beliefs/design docs    mempalace_search → semantic retrieval
-                                docs/product-specs/ ← product scope        mempalace_kg_* → temporal KG
-                                docs/exec-plans/ ← plans + tech debt       mempalace_diary_* → agent diary
-                                docs/references/*-llms.txt ← dense refs    mempalace mine/wake-up/repair → CLI fallback
-                                docs/{DESIGN,SECURITY,...}.md ← domains
+MEMORY.md
+.moss-mem/
+  tasks/
+    MEMORY_ARCHIVE.md
+    archive/
+    .edit_lock
+  summaries/
+  index-cache/
 ```
 
-Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/memory_manager.py knowledge-init --domain <web|mobile|api|cli> && mempalace mine docs/ --wing <project>`.
+Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/memory_manager.py knowledge-init && mempalace mine .moss-mem/ --wing <project>`.
 
 ## Decision Tree
 
@@ -152,20 +147,20 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   CLI:   mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>
   MCP:   n/a (bulk operation — use CLI)
 
-"init knowledge" / "scaffold docs"
+"init knowledge" / "initialize memory layout"
   python3 {base}/scripts/memory_manager.py knowledge-init [--domain <web|mobile|api|cli>]
-  → Creates AGENTS.md, ARCHITECTURE.md, docs/, docs/exec-plans/{active,completed}/, docs/references/*-llms.txt
-  → Creates runtime dirs .moss-mem/tasks/, .moss-mem/summaries/, .moss-mem/index-cache/
+  → Compatibility alias for memory init only; --domain is ignored
+  → Creates MEMORY.md, .moss-mem/tasks/, .moss-mem/summaries/, .moss-mem/index-cache/
+  → Does not create, move, or edit AGENTS.md, ARCHITECTURE.md, or docs/
 
-"knowledge index" / "regenerate index"
+"knowledge index" / "regenerate memory index"
   python3 {base}/scripts/memory_manager.py knowledge-index
-  → Auto-generates docs/index.md from current root entry docs + docs/ tree
-  → Lists entry points, design docs, product specs, exec plans, generated docs, operating docs, references
+  → Writes .moss-mem/index-cache/memory-index.md from .moss-mem/tasks/ and .moss-mem/summaries/
 
-"knowledge check" / "is docs index fresh?"
+"knowledge check" / "check memory layout"
   python3 {base}/scripts/memory_manager.py knowledge-check [--strict]
-  → Verifies required Harness files/dirs exist and docs/index.md is newer than all indexed sources
-  → --strict also fails when scaffold placeholder markers remain
+  → Validates memory layout only: MEMORY.md plus .moss-mem/tasks/, summaries/, and index-cache/
+  → Treats AGENTS.md as optional read-only external context when present
 
 "capture harness summary" / "session summary"
   python3 {base}/scripts/memory_manager.py summary-capture -t "<topic>" -s "<summary>" \
@@ -173,14 +168,10 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   → Writes .moss-mem/summaries/YYYYMMDD-HHMMSS-<topic>.md
   → Mine summaries with: mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
 
-"add reference" / "capture reference"
-  Write to docs/references/<name>-llms.txt — LLM-optimized format (topic-focused, concise, with keywords)
-  → Template sections: Key Concepts / Commands / Conventions / Gotchas / Related Files
-
 "record decision" / "capture belief"
   python3 {base}/scripts/memory_manager.py update -k "<decision>"
-  → Also append durable architecture decisions to ARCHITECTURE.md or docs/design-docs/core-beliefs.md
-  → Product-facing decisions belong in docs/product-specs/ or docs/PRODUCT_SENSE.md
+  → Stores moss-mem state in MEMORY.md and .moss-mem/ only
+  → If a separate project documentation system exists, treat it as external and follow explicit user/project instructions outside moss-mem
 ```
 
 ## Prerequisites
@@ -224,123 +215,60 @@ In enhanced and cli-fallback modes, `mempalace instructions help` provides a cur
 | **cli-fallback** | hybrid (cosine+BM25, CLI) | via extract general | scratchpad notes | batched (mine) | wake-up snapshot |
 | **file-only** | grep | manual annotation | add-note [DIARY] | none | grep |
 
-## Knowledge Layer — Harness Repository Structure
+## Memory Layer — Owned Repository State
 
-OpenAI's harness engineering pattern treats repository knowledge as a **system of record** that agents can navigate progressively: short startup files point to focused docs, and dense reference files serve agent retrieval. moss-mem follows that shape:
+moss-mem owns only two repository locations:
 
-- `MEMORY.md` stays tiny and volatile: current pointer, last action, next step.
-- `AGENTS.md` and `ARCHITECTURE.md` are root entry points: map the repo, do not become encyclopedias.
-- `docs/` stores durable project knowledge humans and agents can review.
-- `.moss-mem/` stores runtime state: active task files, harness summaries, cache. It is not the durable knowledge layer.
-- MemPalace indexes files and adds semantic/KG/diary retrieval; it never replaces files as the source of truth.
+- `MEMORY.md` — tiny startup state: current pointer, last action, next step.
+- `.moss-mem/**` — project-local memory store for task files, summaries, archives, locks, and generated memory index cache.
+
+Everything else is external context. `AGENTS.md`, architecture notes, product specs, design docs, plan docs, and root documentation trees may exist in a project, but moss-mem does not create, move, edit, require, or validate them. MemPalace indexes files and adds semantic/KG/diary retrieval; it never replaces files as the source of truth.
 
 ### Directory Structure
 
 ```
-AGENTS.md                         ← agent startup map; short, link-heavy
-ARCHITECTURE.md                   ← system architecture map; short, link-heavy
-MEMORY.md                         ← current task state (<80 lines)
-
-docs/
-├── index.md                      ← generated knowledge map (knowledge-index)
-├── design-docs/
-│   ├── index.md                  ← design-doc navigation
-│   ├── core-beliefs.md           ← enduring principles and anti-patterns
-│   └── ...
-├── exec-plans/
-│   ├── active/                   ← implementation plans in progress
-│   ├── completed/                ← verified completed plans
-│   └── tech-debt-tracker.md      ← known debt with severity and resolution plan
-├── generated/
-│   └── db-schema.md              ← generated schema/reference snapshots
-├── product-specs/
-│   ├── index.md                  ← product spec navigation
-│   ├── new-user-onboarding.md    ← example product spec slot
-│   └── ...
-├── references/
-│   ├── design-system-reference-llms.txt
-│   ├── nixpacks-llms.txt
-│   ├── uv-llms.txt
-│   └── ...
-├── DESIGN.md
-├── FRONTEND.md
-├── PLANS.md
-├── PRODUCT_SENSE.md
-├── QUALITY_SCORE.md
-├── RELIABILITY.md
-└── SECURITY.md
-
+MEMORY.md
 .moss-mem/
-├── tasks/                        ← active/archive task handoff files
-├── summaries/                    ← imported Codex/OpenAI harness summaries
-└── index-cache/                  ← generated cache only
+  tasks/
+    MEMORY_ARCHIVE.md
+    archive/
+    .edit_lock
+  summaries/
+  index-cache/
 ```
 
-### When to Update Each Doc
+### Ownership Rules
 
-| Document | Update when... | Do not put here |
-|----------|----------------|-----------------|
-| `MEMORY.md` | Current task pointer, next step, last action changes | Long explanations, specs, architecture essays |
-| `AGENTS.md` | Startup workflow or mandatory read order changes | Full project documentation |
-| `ARCHITECTURE.md` | System boundaries, module map, core decisions change | Detailed feature specs |
-| `docs/design-docs/core-beliefs.md` | A principle should guide many future decisions | One-off implementation notes |
-| `docs/product-specs/` | User-facing scope or acceptance criteria changes | Internal refactor plans |
-| `docs/exec-plans/active/` | A multi-step implementation plan starts | Current session scratchpad |
-| `docs/exec-plans/tech-debt-tracker.md` | Debt is discovered but intentionally deferred | Bugs that are fixed immediately |
-| `docs/references/*-llms.txt` | A tool/library/convention repeatedly matters to agents | Narrative tutorials |
-| `.moss-mem/summaries/` | A harness/session/compact summary must be preserved | Durable architecture decisions without a docs/ link |
-
-### LLM-Optimized Reference Format
-
-Reference files in `docs/references/` use dense, keyword-rich `*-llms.txt` format:
-
-```markdown
-# <Topic> Reference for LLMs
-
-## Key Concepts
-- <concept>: <one-line definition>
-
-## Commands
-- `<command>` — <effect>
-
-## Conventions
-- Always X before Y
-- Never Z without W
-
-## Gotchas
-- <surprising behavior>
-- <common mistake>
-
-## Related Files
-- `src/path/to/key-file.py` — <why relevant>
-```
+| Path | moss-mem behavior | Do not put here |
+|------|-------------------|-----------------|
+| `MEMORY.md` | Current task pointer, next step, last action, compact scratchpad | Long explanations, specs, architecture essays |
+| `.moss-mem/tasks/` | Active/archive task handoff files and `MEMORY_ARCHIVE.md` | Broad project docs or product/design plans |
+| `.moss-mem/summaries/` | Imported harness/session summaries | Permanent project documentation that must live elsewhere |
+| `.moss-mem/index-cache/` | Generated memory index cache | Hand-authored doctrine |
+| `AGENTS.md` | Optional read-only external context if present | moss-mem-created or moss-mem-edited content |
+| Project docs | Optional read-only external context if present | moss-mem state |
 
 ### Knowledge Operations
 
-**knowledge-init** — Scaffold Harness-style docs and runtime dirs
+**knowledge-init** — Compatibility alias for memory init
 ```
 python3 {base}/scripts/memory_manager.py knowledge-init [--domain web|mobile|api|cli]
 ```
-Creates root entry docs, `docs/`, `docs/index.md`, `docs/design-docs/core-beliefs.md`, `docs/exec-plans/{active,completed}/`, `docs/references/*-llms.txt`, `.moss-mem/summaries/`, and `.moss-mem/index-cache/`. Existing files are never overwritten. If `docs/index.md` is stale after manual doc edits, run `knowledge-index` then `knowledge-check`; never hand-edit generated index content as doctrine.
+Creates `MEMORY.md`, `.moss-mem/tasks/`, `.moss-mem/summaries/`, and `.moss-mem/index-cache/`. It does not create `AGENTS.md`, `ARCHITECTURE.md`, or `docs/`. The optional `--domain` flag is accepted only for compatibility and does not scaffold project documentation.
 
-**knowledge-index** — Regenerate knowledge map
+**knowledge-index** — Regenerate memory index
 ```
 python3 {base}/scripts/memory_manager.py knowledge-index
 ```
-Scans `AGENTS.md`, `ARCHITECTURE.md`, and `docs/`, then regenerates `docs/index.md`. It intentionally skips `.moss-mem/tasks/` because task files are chronological runtime state.
+Regenerates `.moss-mem/index-cache/memory-index.md` from `.moss-mem/tasks/` and `.moss-mem/summaries/`. The generated index is a cache; do not hand-edit it as doctrine.
 
-**knowledge-check** — Validate Harness docs freshness
+**knowledge-check** — Validate memory layout only
 ```
 python3 {base}/scripts/memory_manager.py knowledge-check [--strict]
 ```
-Checks required Harness files/directories, verifies `docs/index.md` is fresh relative to `AGENTS.md`, `ARCHITECTURE.md`, and `docs/**/*.md|txt`, and warns about scaffold placeholders. `--strict` turns placeholder warnings into failures.
+Validates memory layout only: `MEMORY.md`, `.moss-mem/tasks/`, `.moss-mem/tasks/MEMORY_ARCHIVE.md`, `.moss-mem/summaries/`, `.moss-mem/index-cache/`. `AGENTS.md` is optional read-only context.
 
-If it fails with `docs/index.md is stale`, run:
-```
-python3 {base}/scripts/memory_manager.py knowledge-index
-```
-
-**summary-capture** — Store OpenAI/Codex harness summaries
+**summary-capture** — Store harness/session summaries
 ```
 python3 {base}/scripts/memory_manager.py summary-capture \
   --topic "auth refactor" \
@@ -355,14 +283,13 @@ Writes `.moss-mem/summaries/YYYYMMDD-HHMMSS-auth-refactor.md`. Before handoff, m
 mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
 ```
 
-### Knowledge Layer Philosophy
+### Memory Layer Philosophy
 
-1. **Short map, deep docs**: startup files route the agent to the right docs; they do not carry all context.
-2. **Files first**: durable knowledge lives in repo files; MemPalace mirrors and searches it.
-3. **Purpose-structured**: docs are organized by purpose, not chronology. Chronology belongs in `.moss-mem/tasks/` and `.moss-mem/summaries/`.
-4. **Progressive disclosure**: read `docs/index.md` first, then open only relevant docs for the task.
-5. **Mechanical freshness**: run `knowledge-index` after adding/removing docs; mine changed docs into MemPalace every 3-5 doc updates or before handoff.
-6. **Summary discipline**: harness summaries are compact evidence. Promote durable decisions from summaries into `ARCHITECTURE.md` or `docs/`, then link back.
+1. **Files first**: `MEMORY.md` and `.moss-mem/**` are authoritative for moss-mem state; MemPalace mirrors and searches them.
+2. **Memory-only ownership**: moss-mem never creates or requires root project docs, architecture docs, product specs, design docs, quality docs, or broad harness scaffolds.
+3. **Read-only external context**: if `AGENTS.md` or project docs exist, read them only when useful and when project instructions allow; do not mutate them as part of moss-mem.
+4. **Chronological handoff**: task chronology belongs in `.moss-mem/tasks/`; session summaries belong in `.moss-mem/summaries/`; generated memory index data belongs in `.moss-mem/index-cache/`.
+5. **Graceful degradation**: MCP/CLI failures never block lifecycle writes; update files first and mine/sync later.
 
 ## Operations
 
@@ -413,9 +340,9 @@ Enhanced (MCP): `mempalace_update_drawer` (mark complete) → `mempalace_sync pr
 | **add-note** | `python3 {base}/scripts/memory_manager.py add-note -n "Note"` | Timestamped scratchpad note |
 | **check** | `python3 {base}/scripts/memory_manager.py check [--fix]` | Verify handoff; `--fix` auto-fills from git |
 | **recover** | `python3 {base}/scripts/memory_manager.py recover` | Interrupt recovery: lock → completeness → git diff → git log → stash |
-| **knowledge-init** | `python3 {base}/scripts/memory_manager.py knowledge-init [--domain <type>]` | Scaffold Harness-style `docs/` + runtime dirs |
-| **knowledge-index** | `python3 {base}/scripts/memory_manager.py knowledge-index` | Regenerate `docs/index.md` from root/docs tree |
-| **knowledge-check** | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate Harness structure and `docs/index.md` freshness |
+| **knowledge-init** | `python3 {base}/scripts/memory_manager.py knowledge-init [--domain <type>]` | Compatibility alias for memory init; creates MEMORY.md + `.moss-mem/` only |
+| **knowledge-index** | `python3 {base}/scripts/memory_manager.py knowledge-index` | Regenerate `.moss-mem/index-cache/memory-index.md` from tasks and summaries |
+| **knowledge-check** | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate memory layout only |
 | **summary-capture** | `python3 {base}/scripts/memory_manager.py summary-capture -t "Topic" -s "Summary"` | Capture harness/session summary to `.moss-mem/summaries/` |
 
 ### Skill Invocation Mapping (--action args)
@@ -467,7 +394,7 @@ Full drawer: mempalace_get_drawer drawer_id="<id>" (MCP) or re-search with --res
 ```
 
 CLI fallback: `mempalace search "<query>" --wing <project>` (hybrid vector+keyword, not full semantic).
-File fallback: `grep -r "<query>" .moss-mem/tasks/ .moss-mem/tasks/MEMORY_ARCHIVE.md` (exact string match only — no ranking).
+File fallback: `grep -r "<query>" MEMORY.md .moss-mem/tasks/ .moss-mem/tasks/MEMORY_ARCHIVE.md .moss-mem/summaries/` (exact string match only — no ranking).
 
 ### link — Temporal knowledge graph
 
@@ -688,10 +615,13 @@ Do not do these during moss-mem operations:
 
 | Anti-pattern | Required alternative |
 |--------------|----------------------|
-| Treat MemPalace as the source of truth | Keep files authoritative: `MEMORY.md`, `.moss-mem/tasks/`, and durable `docs/` own state; MemPalace mirrors/searches them |
-| Store durable decisions only in diary, KG, or palace drawers | Promote enduring decisions to `ARCHITECTURE.md` or the relevant `docs/` file, then mirror/index |
+| Create, move, or edit `AGENTS.md` as part of moss-mem | Read it only if present and useful; treat it as agent-owned external context |
+| Create root `docs/`, `ARCHITECTURE.md`, product specs, design docs, or plan docs as part of moss-mem | Keep moss-mem scoped to `MEMORY.md` and `.moss-mem/**`; follow separate explicit project-doc requests outside moss-mem |
+| Store moss-mem state outside `.moss-mem/` except `MEMORY.md` | Move task, summary, archive, lock, and generated index state under `.moss-mem/` |
+| Treat MemPalace as the source of truth | Keep files authoritative: `MEMORY.md` and `.moss-mem/**` own moss-mem state; MemPalace mirrors/searches them |
+| Store decisions only in diary, KG, or palace drawers | Record moss-mem handoff decisions in `.moss-mem/tasks/` via `update -k`; follow separate explicit project-doc instructions outside moss-mem if needed |
 | Run `mempalace_sync apply=true`, `delete_drawer`, or `delete_tunnel` from memory | Preview first, show what will be removed, then wait at the 🛑 STOP gate |
-| Manually edit generated `docs/index.md` as doctrine | Update the source docs, then run `knowledge-index` and `knowledge-check` |
+| Manually edit generated `.moss-mem/index-cache/memory-index.md` as doctrine | Update `.moss-mem/tasks/` or `.moss-mem/summaries/`, then run `knowledge-index` and `knowledge-check` |
 | Skip handoff gates because a task looks small | Run `check`/`check --fix`, verify handoff fields, and confirm diary/sync gates before completing |
 | Let MCP/CLI failures block lifecycle writes | Degrade to file-only, finish the task update, and mine/sync later |
 
@@ -745,10 +675,10 @@ Step 7: moss-mem start -d "..." -n "..."
 # 1. Initialize memory system (always)
 python3 {base}/scripts/memory_manager.py init
 
-# 2. Scaffold knowledge base (recommended)
+# 2. Initialize memory layout (compatibility alias; optional --domain is ignored)
 python3 {base}/scripts/memory_manager.py knowledge-init [--domain web|mobile|api|cli]
-# → Creates root entry docs, docs/, .moss-mem/summaries/, .moss-mem/index-cache/
-# → Fill in ARCHITECTURE.md and docs/design-docs/core-beliefs.md with project specifics
+# → Creates MEMORY.md, .moss-mem/tasks/, .moss-mem/summaries/, .moss-mem/index-cache/
+# → Does not create or edit AGENTS.md, ARCHITECTURE.md, or docs/
 
 # 3. Install MemPalace
 pip install mempalace
@@ -760,10 +690,10 @@ mempalace mine <project_dir> --wing <project_name>
 # 5. Register MCP server with the active coding runtime when MCP is available
 # Example: claude mcp add mempalace -- mempalace-mcp
 
-# 6. Initial mine of task files + knowledge docs
+# 6. Initial memory check and mine
 python3 {base}/scripts/memory_manager.py knowledge-check
+python3 {base}/scripts/memory_manager.py knowledge-index
 mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project_name>
-mempalace mine docs/ --wing <project_name>  # index durable knowledge docs
 mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project_name>
 ```
 
@@ -793,27 +723,14 @@ mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <proj
 ## File Tree
 
 ```
-AGENTS.md                      ← startup map; short and link-heavy
-ARCHITECTURE.md                ← high-level system map
-MEMORY.md                      ← current state (<80 lines)
-docs/                          ← durable Harness-style knowledge
-  ├── index.md                 ← generated knowledge map
-  ├── design-docs/             ← principles and design decisions
-  ├── exec-plans/              ← active/completed plans + tech debt
-  ├── generated/               ← generated references such as db-schema.md
-  ├── product-specs/           ← product requirements and acceptance criteria
-  ├── references/              ← LLM-optimized *-llms.txt references
-  ├── DESIGN.md
-  ├── FRONTEND.md
-  ├── PLANS.md
-  ├── PRODUCT_SENSE.md
-  ├── QUALITY_SCORE.md
-  ├── RELIABILITY.md
-  └── SECURITY.md
-.moss-mem/                     ← runtime state, not durable doctrine
-  ├── tasks/                   ← task lifecycle + handoff files
-  ├── summaries/               ← imported harness/session summaries
-  └── index-cache/             ← generated cache only
+MEMORY.md
+.moss-mem/
+  tasks/
+    MEMORY_ARCHIVE.md
+    archive/
+    .edit_lock
+  summaries/
+  index-cache/
 ```
 
 ## Troubleshooting
@@ -827,12 +744,12 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 | `MEMORY.md` missing | Run `python3 {base}/scripts/memory_manager.py init` | Create the task with `start`, then add only the current pointer to `MEMORY.md` manually if init cannot run |
 | Stale `.edit_lock` after crash | Run `python3 {base}/scripts/memory_manager.py recover` | Remove `.moss-mem/tasks/.edit_lock`, then run `check --fix` before the next write |
 | MCP tool missing or timeout | Switch to CLI-fallback and run the equivalent `mempalace` command | Use file-only path; record skipped mirroring in the task note and batch `mempalace mine` later |
-| CLI `mempalace` unavailable | Continue file-only after the Python memory command succeeds | Add a note: `[SYNC-PENDING] install/run mempalace`, then mine docs/tasks at handoff |
-| Search returns empty | Widen query or threshold; run CLI `mempalace search` | Run exact file search over `.moss-mem/tasks/`, `MEMORY.md`, and `docs/`; then re-mine relevant files |
-| `docs/index.md` stale | Run `knowledge-index` then `knowledge-check` | Read `AGENTS.md` + `ARCHITECTURE.md` directly, and mark `[INDEX-STALE]` in the active task |
+| CLI `mempalace` unavailable | Continue file-only after the Python memory command succeeds | Add a note: `[SYNC-PENDING] install/run mempalace`, then mine `.moss-mem/` at handoff |
+| Search returns empty | Widen query or threshold; run CLI `mempalace search` | Run exact file search over `MEMORY.md` and `.moss-mem/`; then re-mine relevant memory files |
+| `.moss-mem/index-cache/memory-index.md` stale | Run `knowledge-index` then `knowledge-check` | Search `MEMORY.md` and `.moss-mem/` directly, and mark `[INDEX-STALE]` in the active task |
 | Handoff fields incomplete | Run `check --fix` | Fill `-l`, `-k`, and `-m` manually, then verify with `show` before `complete` |
 | `mempalace_sync` preview shows stale drawers | Stop at 🛑 STOP and show the preview | Skip `apply=true`; use `mempalace_get_drawer` or file search to verify before pruning later |
-| `knowledge-check --strict` fails on placeholders | Replace scaffold placeholders in source docs | Run non-strict `knowledge-check`, record remaining placeholders as a task landmine, and continue |
+| `knowledge-check --strict` fails | Fix missing/stale memory layout paths or rerun `knowledge-init`/`knowledge-index` | Run non-strict `knowledge-check`, record remaining layout issues as a task landmine, and continue |
 
 | Problem | Fix |
 |---------|-----|
@@ -840,8 +757,8 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 | Stale lock file | `rm .moss-mem/tasks/.edit_lock` |
 | Task pointer stale | `moss-mem show --file <path>` |
 | Empty handoff fields | `moss-mem check --fix` |
-| `docs/index.md` stale | `moss-mem knowledge-index` then `moss-mem knowledge-check` |
-| Harness docs missing | `moss-mem knowledge-init --domain <type>`; existing files are not overwritten |
+| `.moss-mem/index-cache/memory-index.md` stale | `moss-mem knowledge-index` then `moss-mem knowledge-check` |
+| Memory layout missing | `moss-mem knowledge-init --domain <type>`; existing memory files are not overwritten |
 | Session killed mid-handoff | `moss-mem recover` then `moss-mem check --fix` |
 | Stale task (>7 days) | `moss-mem recover` → complete or restart |
 | MCP tools not found / timeout | Degrade to CLI-fallback; check the active runtime's MCP server list/config |
@@ -856,21 +773,19 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 
 ## Design Decisions
 
-1. **Why two layers?** MEMORY.md is the startup index (always readable, <80 lines). MCP adds semantic depth; CLI adds bulk maintenance; both degrade gracefully.
+1. **Why two layers?** `MEMORY.md` is the startup index (always readable, <80 lines) and `.moss-mem/**` holds project-local memory details. MCP adds semantic depth; CLI adds bulk maintenance; both degrade gracefully.
 2. **Why MCP primary + CLI fallback?** MCP offers semantic search, temporal KG, and diary — capabilities that need a stateful server. CLI covers bulk operations (mine, repair) and provides a fast fallback path when MCP is down.
-3. **Why best-effort MCP mirroring?** File is the system of record. MCP mirroring enhances searchability but must never block file operations.
+3. **Why best-effort MCP mirroring?** Files are the system of record. MCP mirroring enhances searchability but must never block file operations.
 4. **Why `mine --extract general` for CLI fallback?** Auto-classification into decisions/milestones/problems provides structured discovery even without MCP's explicit KG.
 5. **Why single `_memory_update()`?** Guarantees MEMORY.md never partially written; section parse is idempotent.
 6. **Why `<!-- none -->` placeholder?** Distinguishes "intentionally empty" from "forgot to fill."
 7. **Why git integration for auto-fix?** Git diff/log provide free recovery context in every code project.
-8. **Why a knowledge layer separate from task tracking?** Task files are transient (start→complete→archive); knowledge docs capture enduring truths (architecture, principles, conventions). Inspired by OpenAI's harness engineering: purpose-structured docs let agents read only what's relevant, reducing context waste. LLM-optimized reference files trade narrative prose for dense, searchable information.
-9. **Why auto-generated index?** Manually maintained indices drift. `knowledge-index` scans root entry docs plus `docs/` and regenerates `docs/index.md` — always accurate, zero maintenance burden.
-10. **Why LLM-optimized reference format?** Traditional reference docs are written for humans (narrative, examples, tutorials). Agent-facing references prioritize keyword density, one-line definitions, and explicit gotchas — optimizing for the retrieval+inference pattern agents use.
+8. **Why memory-only ownership?** Project documentation has many owners and conventions. moss-mem stays predictable by managing only `MEMORY.md` and `.moss-mem/**`, while treating `AGENTS.md` and project docs as optional read-only context.
+9. **Why auto-generated memory index?** Manually maintained indices drift. `knowledge-index` scans `.moss-mem/tasks/` and `.moss-mem/summaries/` and regenerates `.moss-mem/index-cache/memory-index.md` as a cache.
 
 ## Skill Integration
 
 - **init skill**: After creating project structure, run `moss-mem init` then `moss-mem knowledge-init`.
-- **Any long task**: `start` → `update` → `check` before `complete`. Archive enduring decisions to `ARCHITECTURE.md` or the relevant `docs/` page.
-- **Cross-session recovery**: `moss-mem context` (MCP multi-tool) or `moss-mem show` + `mempalace wake-up` (CLI snapshot). Also check `docs/index.md` for the project knowledge map.
-- **Adding references**: When you find yourself explaining the same tool/convention repeatedly, capture it once in `docs/references/<topic>-llms.txt`.
-- **Setup**: `pip install mempalace && mempalace init <dir> --yes && mempalace mine docs/ --wing <project>`; register `mempalace-mcp` with the active runtime when MCP tools are available.
+- **Any long task**: `start` → `update` → `check` before `complete`. Record moss-mem handoff decisions with `update -k` and summaries under `.moss-mem/`.
+- **Cross-session recovery**: `moss-mem context` (MCP multi-tool) or `moss-mem show` + `mempalace wake-up` (CLI snapshot). Use `.moss-mem/index-cache/memory-index.md` if generated.
+- **Setup**: `pip install mempalace && mempalace init <dir> --yes && mempalace mine .moss-mem/ --wing <project>`; register `mempalace-mcp` with the active runtime when MCP tools are available.
