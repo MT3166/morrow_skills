@@ -1,11 +1,14 @@
 ---
 name: moss-mem
 description: >-
-  Two-layer project memory for coding-agent sessions:
-  MEMORY.md (startup state) + .moss-mem/ (tasks, summaries, index cache),
-  with optional MemPalace MCP/CLI for semantic search, temporal KG, diary,
-  wake-up, mine, and repair. Degrades gracefully when MCP/CLI unavailable.
-  Triggers: task lifecycle, memory ops, search, link, diary, handoff, wake-up.
+  Memory warehouse for coding-agent sessions. **`.moss-mem/`** is the shelf
+  (files: tasks, summaries, index cache, archive, lock — always readable, no
+  service required); **MemPalace** is the warehouse that indexes the shelves
+  and is the primary way to *read back* (semantic search, temporal KG, diary,
+  wake-up). Writes go to the shelves; reads route through the warehouse first,
+  then loading dock (CLI), then `grep`. Degrades gracefully when MCP/CLI
+  unavailable. Triggers: task lifecycle, memory ops, search, link, diary,
+  handoff, wake-up, knowledge init/index/check, summary capture.
 triggers:
   # ── Task lifecycle ──
   - start task
@@ -78,7 +81,7 @@ triggers:
   - capture belief
   - record decision
   - 记录决策
-version: "3.3"
+version: "3.3.1"
 ---
 
 # moss-mem — Project Memory Management
