@@ -116,7 +116,7 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   → CLI: skip mirroring
 
 "complete task"
-  check → check --fix → update -l/-k/-m → complete
+  check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → complete
   → MCP: mempalace_update_drawer → mempalace_sync
   → CLI: skip
 
@@ -139,9 +139,9 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   File:  show → grep .moss-mem/tasks/
 
 "handoff"
-  MCP:   check → check --fix → update -l/-k/-m → diary_write → complete → sync → start
-  CLI:   check → check --fix → update -l/-k/-m → complete → mine → start
-  File:  check → check --fix → update -l/-k/-m → complete → start
+  MCP:   check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → diary_write → complete → sync → start
+  CLI:   check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → complete → mine → start
+  File:  check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → complete → start
 
 "mine memory"
   CLI:   mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>
