@@ -100,6 +100,19 @@ MEMORY.md
 
 Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/memory_manager.py knowledge-init && mempalace mine .moss-mem/ --wing <project>`.
 
+### Quick Dispatch
+
+| User intent | Primary command | Deep reference |
+|------------|----------------|----------------|
+| Start task | `python3 {base}/scripts/memory_manager.py start -d "…" -n "…"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
+| Update progress | `python3 {base}/scripts/memory_manager.py update -d "…" -n "…" -s "🔧"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
+| Complete task | `check` → `check --fix` → `update -l/-k/-m` → `complete` | [Agent Handoff Protocol](#agent-handoff-protocol) |
+| Search memory | `mempalace_search query="…"` → fallback: `grep -r "…" .moss-mem/` | [MCP search](#search--hybrid-vector-search) |
+| Context recovery | `show` → `diary_read` → `search` → `kg_query` → synthesize | [MCP context](#context--rich-context-recovery) |
+| Handoff | `check` → `check --fix` → `update -l/-k/-m` → diary → `complete` → sync → `start` | [Agent Handoff Protocol](#agent-handoff-protocol) |
+| Record decision | `python3 {base}/scripts/memory_manager.py update -d "…" -n "…" -s "🔧" -k "…"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
+| Session summary | `python3 {base}/scripts/memory_manager.py summary-capture -t "…" -s "…"` | [Knowledge Operations](#knowledge-operations) |
+
 ## Decision Tree
 
 ```
