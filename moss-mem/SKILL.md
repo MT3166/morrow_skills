@@ -177,8 +177,8 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
 ## Prerequisites
 
 - Python 3.8+ (stdlib only). Run from **project root** (where MEMORY.md lives).
-- Script: `{base}/scripts/memory_manager.py` — `{base}` is the `Base directory for this skill:` line in invocation header.
-- After `kill -9`: `rm .moss-mem/tasks/.edit_lock`.
+- Script: `{base}/scripts/memory_manager.py` — `{base}` resolves from the `Base directory for this skill:` line in the runtime invocation header.
+- After forced termination (e.g. `kill -9` / `taskkill /F`): remove `.moss-mem/tasks/.edit_lock` (Unix: `rm`, Windows cmd: `del`, PowerShell: `Remove-Item`).
 - **MemPalace MCP** (primary): installed via `pip install mempalace`, initialized via `mempalace init <project_dir> --yes && mempalace mine .moss-mem/ --wing <project>`, then registered with the active coding runtime's MCP configuration. Mine only moss-mem memory paths unless the user explicitly asks to index external project docs.
 - **MemPalace CLI** (fallback): same binary — `mempalace --version` confirms availability.
 
@@ -618,6 +618,7 @@ Do not do these during moss-mem operations:
 | Manually edit generated `.moss-mem/index-cache/memory-index.md` as doctrine | Update `.moss-mem/tasks/` or `.moss-mem/summaries/`, then run `knowledge-index` and `knowledge-check` |
 | Skip handoff gates because a task looks small | Run `check`/`check --fix`, verify handoff fields, and confirm diary/sync gates before completing |
 | Let MCP/CLI failures block lifecycle writes | Degrade to file-only, finish the task update, and mine/sync later |
+| Use `--action <name>` wrapper arguments with `memory_manager.py` | Use the concrete subcommands listed in Meta Operations. `memory_manager.py` does not implement a top-level `--action` dispatcher |
 
 ## Agent Handoff Protocol
 
@@ -681,8 +682,10 @@ pip install mempalace
 mempalace init <project_dir> --yes
 mempalace mine .moss-mem/ --wing <project_name>
 
-# 5. Register MCP server with the active coding runtime when MCP is available
-# Example: claude mcp add mempalace -- mempalace-mcp
+# 5. Register MCP server with your coding runtime when MCP is available
+#    Claude Code:  claude mcp add mempalace -- mempalace-mcp
+#    Codex:        codex mcp add mempalace
+#    Cursor et al: add to MCP configuration
 
 # 6. Initial memory check and mine
 python3 {base}/scripts/memory_manager.py knowledge-check
@@ -748,7 +751,7 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 | Problem | Fix |
 |---------|-----|
 | MEMORY.md missing | `moss-mem init` |
-| Stale lock file | `rm .moss-mem/tasks/.edit_lock` |
+| Stale lock file | Remove `.moss-mem/tasks/.edit_lock` — see [Platform Notes](#platform-notes) for OS-specific commands |
 | Task pointer stale | `moss-mem show --file <path>` |
 | Empty handoff fields | `moss-mem check --fix` |
 | `.moss-mem/index-cache/memory-index.md` stale | `moss-mem knowledge-index` then `moss-mem knowledge-check` |
@@ -776,6 +779,20 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 7. **Why git integration for auto-fix?** Git diff/log provide free recovery context in every code project.
 8. **Why memory-only ownership?** Project documentation has many owners and conventions. moss-mem stays predictable by managing only `MEMORY.md` and `.moss-mem/**`, while treating `AGENTS.md` and project docs as optional read-only context.
 9. **Why auto-generated memory index?** Manually maintained indices drift. `knowledge-index` scans `.moss-mem/tasks/` and `.moss-mem/summaries/` and regenerates `.moss-mem/index-cache/memory-index.md` as a cache.
+
+## Platform Notes
+
+Commands in this skill are written for Unix-like shells (macOS, Linux, Git Bash on Windows). On Windows (cmd.exe / PowerShell), use these equivalents:
+
+| Operation | Unix (macOS / Linux / Git Bash) | Windows cmd | Windows PowerShell |
+|-----------|-------------------------------|-------------|-------------------|
+| Python | `python3 {base}/scripts/memory_manager.py ...` | `python {base}/scripts/memory_manager.py ...` | `python {base}/scripts/memory_manager.py ...` |
+| Search text | `grep -r "query" .moss-mem/` | `findstr /s "query" .moss-mem\*` | `Select-String -Path ".moss-mem\*" -Pattern "query"` |
+| Remove file | `rm .moss-mem/tasks/.edit_lock` | `del .moss-mem\tasks\.edit_lock` | `Remove-Item .moss-mem\tasks\.edit_lock` |
+| Force-kill process | `kill -9 <pid>` | `taskkill /F /PID <pid>` | `Stop-Process -Id <pid> -Force` |
+| List directory | `ls` | `dir` | `Get-ChildItem` |
+
+The `memory_manager.py` script uses Python stdlib only and runs on all three platforms. Forward slashes (`/`) in paths are normalized by Python on Windows; use backslashes only in native shell commands (cmd / PowerShell).
 
 ## Skill Integration
 
