@@ -85,18 +85,25 @@ version: "3.3"
 
 ## TL;DR
 
-Two-layer memory: **MEMORY.md** as the always-available startup state + **.moss-mem/** as the project-local memory store. MemPalace MCP/CLI can index, search, and mirror those files, but moss-mem never depends on MemPalace availability. `AGENTS.md` and project docs are external read-only context when present; moss-mem does not create or manage them.
+Think of `.moss-mem/` as the **shelves** of a memory warehouse, and **MemPalace** as the **warehouse itself**.
+
+- **`.moss-mem/` is the shelves** — files on disk, always readable, no service required. This is the system of record. Writing always goes here first.
+- **`MEMORY.md` is the front-desk card** — the tiny index you read first to know where you left off (<80 lines, always loaded).
+- **MemPalace is the warehouse** — it indexes the shelves, builds a semantic + temporal knowledge graph, and is the **primary way to read back** what was stored. When the warehouse is open, route every retrieval (search, context, link, diary) through it. When it is closed, fall back to the shelves directly with `grep`. Never block a write because the warehouse is closed.
 
 ```
-MEMORY.md
-.moss-mem/
-  tasks/
-    MEMORY_ARCHIVE.md
-    archive/
-    .edit_lock
-  summaries/
-  index-cache/
+       WRITE                                       READ
+         │                                           │
+         ▼                                           ▼
+   .moss-mem/  ── mempalace mine ──▶  MemPalace  ── mempalace_search / diary_read / kg_query ──▶  you / next agent
+   (the shelves)        (stock the      (the warehouse)        (query the warehouse)              (read through the
+                          warehouse)                                                              warehouse, not
+                                                                                                 by shelf-climbing)
+   + MEMORY.md
+     (front-desk card)
 ```
+
+`AGENTS.md` and project docs are external read-only context when present; moss-mem does not create or manage them.
 
 Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/memory_manager.py knowledge-init && mempalace mine .moss-mem/ --wing <project>`.
 
@@ -298,11 +305,14 @@ mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <proj
 
 ### Memory Layer Philosophy
 
-1. **Files first**: `MEMORY.md` and `.moss-mem/**` are authoritative for moss-mem state; MemPalace mirrors and searches them.
-2. **Memory-only ownership**: moss-mem never creates or requires root project docs, architecture docs, product specs, design docs, quality docs, or broad harness scaffolds.
-3. **Read-only external context**: if `AGENTS.md` or project docs exist, read them only when useful and when project instructions allow; do not mutate them as part of moss-mem.
-4. **Chronological handoff**: task chronology belongs in `.moss-mem/tasks/`; session summaries belong in `.moss-mem/summaries/`; generated memory index data belongs in `.moss-mem/index-cache/`.
-5. **Graceful degradation**: MCP/CLI failures never block lifecycle writes; update files first and mine/sync later.
+The mental model: **`.moss-mem/` are the shelves. MemPalace is the warehouse. You read through the warehouse, you write to the shelves.**
+
+1. **Shelves vs. warehouse**: `.moss-mem/**` is the **shelf** — raw files on disk, always readable, no service required. MemPalace is the **warehouse** — indexed, searchable, graph-aware, queryable. They are not the same thing. The shelves hold the truth; the warehouse makes the truth findable.
+2. **Files are authoritative, always**: `MEMORY.md` and `.moss-mem/**` are the system of record. The warehouse mirrors them; if a drawer and a file disagree, the file wins. Never edit a drawer as if it were a source file.
+3. **Read through the warehouse, write to the shelves**: when MemPalace is available, route every retrieval (`search`, `context`, `link`, `diary`) through it — that is the whole point of stocking the warehouse. Fall back to `grep` on the shelves only when the warehouse is closed. **Never let a closed warehouse block a write** — the shelves are always there.
+4. **Memory-only ownership**: moss-mem owns only `MEMORY.md` and `.moss-mem/**`. It never creates or requires root project docs, architecture docs, product specs, design docs, quality docs, or broad harness scaffolds. Treat `AGENTS.md` and project docs as optional read-only context when present; do not mutate them as part of moss-mem.
+5. **One shelf, one job**: task handoff files → `.moss-mem/tasks/`; session summaries → `.moss-mem/summaries/`; generated memory index cache → `.moss-mem/index-cache/`. Don't mix.
+6. **Graceful degradation in three steps**: warehouse open (MCP, full semantic + KG + diary) → loading dock (CLI, hybrid cosine+BM25 + mine) → shelf-climbing (`grep`, exact match only). At every step, the next task can still be recorded.
 
 ## Operations
 
@@ -792,6 +802,7 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 7. **Why git integration for auto-fix?** Git diff/log provide free recovery context in every code project.
 8. **Why memory-only ownership?** Project documentation has many owners and conventions. moss-mem stays predictable by managing only `MEMORY.md` and `.moss-mem/**`, while treating `AGENTS.md` and project docs as optional read-only context.
 9. **Why auto-generated memory index?** Manually maintained indices drift. `knowledge-index` scans `.moss-mem/tasks/` and `.moss-mem/summaries/` and regenerates `.moss-mem/index-cache/memory-index.md` as a cache.
+10. **Why the "shelves vs. warehouse" metaphor?** Because the most common failure mode is treating MemPalace as a side feature and reading memories by `grep`-ing raw files — which loses semantic search, the temporal KG, and the diary. The metaphor makes the *direction* of data flow obvious: writes go to the shelves, reads go through the warehouse. If the warehouse is closed, you can still read the shelves; if the shelves are wrong, the warehouse is wrong.
 
 ## Platform Notes
 

@@ -76,5 +76,17 @@
     "prompt": "检查 moss-mem memory layout 和 memory index 是否还是最新；如果我刚更新过任务或 summary，需要告诉我怎么修复",
     "expected": "运行 python3 {base_dir}/scripts/memory_manager.py knowledge-check 验证 MEMORY.md、.moss-mem/tasks/、.moss-mem/tasks/MEMORY_ARCHIVE.md、.moss-mem/summaries/ 与 .moss-mem/index-cache/；若提示 .moss-mem/index-cache/memory-index.md stale，则运行 knowledge-index 后重跑 knowledge-check；不要把手改生成的 memory-index 当作 doctrine",
     "type": "harness_knowledge_check"
+  },
+  {
+    "id": 13,
+    "prompt": "moss-mem 的记忆是怎么存的？MemPalace 和 .moss-mem 是什么关系？",
+    "expected": "清晰阐述三层架构：.moss-mem/ 是原始记忆存储（文件层）→ MemPalace 将文件索引化为可查询的记忆仓库（语义搜索、KG、日记）→ 日常读取优先走 MemPalace（语义搜索），回退到文件 grep。强调 MemPalace 不是可选插件，而是记忆仓库的核心查询引擎。",
+    "type": "architecture_philosophy"
+  },
+  {
+    "id": 14,
+    "prompt": "我想找之前做过的某个功能相关的工作，但记不清具体关键词了，怎么办？",
+    "expected": "引导用户走 MemPalace semantic search（mempalace_search query='大致描述' wing=<project>），利用语义向量搜索即使关键词不精确也能找到相关内容。若 MCP 不可用则用 CLI hybrid search。不直接让人去 grep。",
+    "type": "fuzzy_search_guidance"
   }
 ]
