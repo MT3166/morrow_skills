@@ -970,8 +970,8 @@ def main():
     subparsers.add_parser("init", help="Initialize MEMORY.md and .moss-mem/tasks/")
 
     start_parser = subparsers.add_parser("start", help="Start a new task")
-    start_parser.add_argument("--description", "-d", required=True, help="Task description")
-    start_parser.add_argument("--next-step", "-n", required=True, help="Next step instruction")
+    start_parser.add_argument("--description", "-d", required=False, default="(待补)", help="Task description; defaults to placeholder you can fill in via update")
+    start_parser.add_argument("--next-step", "-n", required=False, default="等待下一步指令", help="Next step instruction; defaults to placeholder you can fill in via update")
 
     update_parser = subparsers.add_parser("update", help="Update task progress")
     update_parser.add_argument("--description", "-d", required=True, help="Progress description")

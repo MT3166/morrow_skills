@@ -113,7 +113,7 @@ Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/
 
 | User intent | Primary command | Deep reference |
 |------------|----------------|----------------|
-| Start task | `python3 {base}/scripts/memory_manager.py start -d "…" -n "…"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
+| Start task | `python3 {base}/scripts/memory_manager.py start` （`-d`/`-n` 都可选，缺省占位 `(待补)` / `等待下一步指令`，用 `update` 补全） | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
 | Update progress | `python3 {base}/scripts/memory_manager.py update -d "…" -n "…" -s "🔧"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
 | Complete task | `check` → `check --fix` → `update -l/-k/-m` → `complete` | [Agent Handoff Protocol](#agent-handoff-protocol) |
 | Search memory | `mempalace_search query="…"` → fallback: `grep -r "…" .moss-mem/` | [MCP search](#search--hybrid-vector-search) |
@@ -129,7 +129,7 @@ Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/
 User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep)
 
 "start task X"
-  python3 {base}/scripts/memory_manager.py start -d "X" -n "next step"
+  python3 {base}/scripts/memory_manager.py start [-d "X" -n "next step"]   # -d/-n 都可选；缺省时用 "(待补)" / "等待下一步指令"，用 update 补全
   → MCP: mempalace_check_duplicate → mempalace_add_drawer room:tasks
   → CLI: skip mirroring (batched later via mempalace mine)
 
@@ -334,9 +334,9 @@ The mental model: **`.moss-mem/` are the shelves. MemPalace is the warehouse. Yo
 
 **start**
 ```
-python3 {base}/scripts/memory_manager.py start -d "Description" -n "Next step instruction"
+python3 {base}/scripts/memory_manager.py start [-d "Description" -n "Next step instruction"]
 ```
-Creates `.moss-mem/tasks/YYYYMMDD-HHMMSS_task.md`, updates MEMORY.md pointer. Status → 🔧.
+Both `-d` and `-n` are **optional**; missing values use the placeholders `(待补)` and `等待下一步指令` so you can fire-and-forget start a task and fill the details in via `update` later. Creates `.moss-mem/tasks/YYYYMMDD-HHMMSS_task.md`, updates MEMORY.md pointer. Status → 🔧.
 
 Enhanced (MCP): `mempalace_check_duplicate` → `mempalace_add_drawer wing=<project> room=tasks`. Skip on failure.
 
