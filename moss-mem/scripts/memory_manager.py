@@ -1084,6 +1084,12 @@ def main():
         elif action == "show":
             cmd_show(None)
         elif action == "set":
+            # Auto-init: if MEMORY.md is missing, create it before setting fields.
+            # Lets a fresh project call `state set current_task="…"` as the very first
+            # command without a separate `state init` round-trip.
+            if not os.path.exists(MEMORY_FILE):
+                cmd_init()
+
             # Collect field values: from pairs (k=v) and from legacy flags
             # Map old field names to new schema
             field_map = {
@@ -1115,6 +1121,10 @@ def main():
                           field_map.get("key_decisions"),
                           field_map.get("landmines"))
         elif action == "commit":
+            # Auto-init: same logic as `state set` — first commit on a fresh project
+            # should not require a separate `state init` round-trip.
+            if not os.path.exists(MEMORY_FILE):
+                cmd_init()
             # commit = start a new task file with the current state
             cmd_start(args.message, "继续推进")
             # then update with the message as last_action

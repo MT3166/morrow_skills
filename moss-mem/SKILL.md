@@ -119,6 +119,8 @@ asks for "full context" / "related past work" / "everything".
 python3 {base}/scripts/memory_manager.py state set current_task="<X>" next_step="<Y>" [status="🔧"|"✅"|"❌"] [last_action="…"] [key_decisions="…"] [landmines="…"]
 ```
 
+**Auto-init**: if `MEMORY.md` doesn't exist, `state set` (and `state commit`) creates it automatically. A fresh project can call `state set current_task="first task"` as its very first command — no separate `state init` round-trip needed.
+
 Field behavior:
 
 | Flag | Omitted | `""` (empty) | Non-empty |
