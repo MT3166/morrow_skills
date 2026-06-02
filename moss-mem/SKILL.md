@@ -7,8 +7,7 @@ description: >-
   and is the primary way to *read back* (semantic search, temporal KG, diary,
   wake-up). Writes go to the shelves; reads route through the warehouse first,
   then loading dock (CLI), then `grep`. Degrades gracefully when MCP/CLI
-  unavailable. Triggers: task lifecycle, memory ops, search, link, diary,
-  handoff, wake-up, knowledge init/index/check, summary capture.
+  unavailable.
 triggers:
   # ── Task lifecycle ──
   - start task
@@ -119,6 +118,7 @@ Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/
 | Complete task | `check` → `check --fix` → `update -l/-k/-m` → `complete` | [Agent Handoff Protocol](#agent-handoff-protocol) |
 | Search memory | `mempalace_search query="…"` → fallback: `grep -r "…" .moss-mem/` | [MCP search](#search--hybrid-vector-search) |
 | Context recovery | `show` → `diary_read` → `search` → `kg_query` → synthesize | [MCP context](#context--rich-context-recovery) |
+| 「我做到哪了」/ 上次任务 | `python3 {base}/scripts/memory_manager.py show`（**1 步 fast-path，优先**） | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
 | Handoff | `check` → `check --fix` → `update -l/-k/-m` → diary → `complete` → sync → `start` | [Agent Handoff Protocol](#agent-handoff-protocol) |
 | Record decision | `python3 {base}/scripts/memory_manager.py update -d "…" -n "…" -s "🔧" -k "…"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
 | Session summary | `python3 {base}/scripts/memory_manager.py summary-capture -t "…" -s "…"` | [Knowledge Operations](#knowledge-operations) |
@@ -156,7 +156,18 @@ User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep
   MCP:   mempalace_diary_read / mempalace_diary_write (AAAK)
   File:  moss-mem add-note "[DIARY] ..."
 
-"what were we working on?" (context recovery)
+"what were we working on?" / "我做到哪了" / "上次任务"
+  ► Fast-path first. Read MEMORY.md directly — 1 step, no script needed.
+  MCP:   show (MEMORY.md + active task file)
+  CLI:   show (same — file-based, no MCP/CLI distinction at this level)
+  File:  cat MEMORY.md  (or python3 {base}/scripts/memory_manager.py show)
+  Default rule: stop at show unless the user explicitly asks for "full context",
+  "recent activity", "related past work", or "everything". Escalating to the
+  6-step recovery on a one-line question is the over-engineering failure mode
+  this routing rule prevents.
+
+"context recovery" / "全面恢复上下文" / "previous work on X"
+  ► Only when user asks for more than the current pointer.
   MCP:   show → diary_read → search → kg_query → traverse → synthesize
   CLI:   show → mempalace wake-up --wing <project>
   File:  show → grep .moss-mem/tasks/
@@ -574,45 +585,12 @@ Typically configured as the active runtime's session-stop / compact hooks — no
 
 ## MCP Quick Reference
 
-### Read (19 tools)
+For the full MemPalace tool catalog (30 tools: 19 read + 11 write) with parameters, see
+[`references/mempalace-tools.md`](references/mempalace-tools.md). This section
+keeps only the confirmation checkpoint table — the part you actually need at write time.
 
-| Tool | Key Parameters | Purpose |
-|------|---------------|---------|
-| `mempalace_status` | — | Palace overview, drawer/wing/room counts |
-| `mempalace_get_taxonomy` | — | Full wing→room→drawer tree |
-| `mempalace_list_wings` | — | All wings with drawer counts |
-| `mempalace_list_rooms` | `wing` (opt) | Rooms within a wing |
-| `mempalace_list_drawers` | `wing`, `room`, `limit`, `offset` | Paginated drawer list |
-| `mempalace_get_drawer` | `drawer_id` | Full drawer content + metadata |
-| `mempalace_search` | `query`, `limit`, `wing`, `room`, `max_distance` | Semantic search (ChromaDB) |
-| `mempalace_check_duplicate` | `content`, `threshold` | Dedup check before write |
-| `mempalace_get_aaak_spec` | — | AAAK dialect specification |
-| `mempalace_traverse` | `start_room`, `max_hops` | Walk palace graph |
-| `mempalace_find_tunnels` | `wing_a`, `wing_b` (both opt) | Cross-wing connections |
-| `mempalace_follow_tunnels` | `wing`, `room` | Room's tunnel connections |
-| `mempalace_list_tunnels` | `wing` (opt) | All explicit tunnels |
-| `mempalace_graph_stats` | — | Palace graph overview |
-| `mempalace_kg_query` | `entity`, `as_of`, `direction` | Temporal KG query |
-| `mempalace_kg_timeline` | `entity` (opt) | Chronological fact timeline |
-| `mempalace_kg_stats` | — | KG overview: entities, triples |
-| `mempalace_diary_read` | `agent_name`, `last_n`, `wing` | Agent diary entries |
-| `mempalace_memories_filed_away` | — | Recent palace checkpoint |
-
-### Write (11 tools)
-
-| Tool | Key Parameters | Purpose |
-|------|---------------|---------|
-| `mempalace_add_drawer` | `wing`, `room`, `content`, `source_file`, `added_by` | Store content (idempotent) |
-| `mempalace_update_drawer` | `drawer_id`, `content`, `wing`, `room` | Update drawer |
-| `mempalace_delete_drawer` | `drawer_id` | Delete drawer (irreversible) |
-| `mempalace_kg_add` | `subject`, `predicate`, `object`, `valid_from`, `valid_to` | Add temporal KG fact |
-| `mempalace_kg_invalidate` | `subject`, `predicate`, `object`, `ended` | Mark fact no longer true |
-| `mempalace_create_tunnel` | `source_wing`, `source_room`, `target_wing`, `target_room`, `label` | Cross-wing link |
-| `mempalace_delete_tunnel` | `tunnel_id` | Remove tunnel |
-| `mempalace_diary_write` | `agent_name`, `entry` (AAAK), `topic`, `wing` | Write diary entry |
-| `mempalace_sync` | `project_dir`, `wing`, `apply` | Prune stale drawers |
-| `mempalace_reconnect` | — | Force reconnect palace DB |
-| `mempalace_hook_settings` | `silent_save`, `desktop_toast` | Hook behavior |
+> Live source of truth: `mempalace instructions help` and `mempalace --help`.
+> Tool names/parameters may shift across versions; the reference file is a snapshot.
 
 ### Confirmation Checkpoints
 
@@ -793,19 +771,6 @@ Use this table to choose the next branch after a failed gate. Apply the first re
 | CLI `mempalace mine` fails | Disk space? Try `--limit 100`; check `mempalace repair-status` |
 | Vector index corrupted | `mempalace repair --yes` |
 | ChromaDB version mismatch | `mempalace migrate [--dry-run]` |
-
-## Design Decisions
-
-1. **Why two layers?** `MEMORY.md` is the startup index (always readable, <80 lines) and `.moss-mem/**` holds project-local memory details. MCP adds semantic depth; CLI adds bulk maintenance; both degrade gracefully.
-2. **Why MCP primary + CLI fallback?** MCP offers semantic search, temporal KG, and diary — capabilities that need a stateful server. CLI covers bulk operations (mine, repair) and provides a fast fallback path when MCP is down.
-3. **Why best-effort MCP mirroring?** Files are the system of record. MCP mirroring enhances searchability but must never block file operations.
-4. **Why `mine --extract general` for CLI fallback?** Auto-classification into decisions/milestones/problems provides structured discovery even without MCP's explicit KG.
-5. **Why single `_memory_update()`?** Guarantees MEMORY.md never partially written; section parse is idempotent.
-6. **Why `<!-- none -->` placeholder?** Distinguishes "intentionally empty" from "forgot to fill."
-7. **Why git integration for auto-fix?** Git diff/log provide free recovery context in every code project.
-8. **Why memory-only ownership?** Project documentation has many owners and conventions. moss-mem stays predictable by managing only `MEMORY.md` and `.moss-mem/**`, while treating `AGENTS.md` and project docs as optional read-only context.
-9. **Why auto-generated memory index?** Manually maintained indices drift. `knowledge-index` scans `.moss-mem/tasks/` and `.moss-mem/summaries/` and regenerates `.moss-mem/index-cache/memory-index.md` as a cache.
-10. **Why the "shelves vs. warehouse" metaphor?** Because the most common failure mode is treating MemPalace as a side feature and reading memories by `grep`-ing raw files — which loses semantic search, the temporal KG, and the diary. The metaphor makes the *direction* of data flow obvious: writes go to the shelves, reads go through the warehouse. If the warehouse is closed, you can still read the shelves; if the shelves are wrong, the warehouse is wrong.
 
 ## Platform Notes
 
