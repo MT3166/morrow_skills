@@ -449,7 +449,7 @@
   <!-- 1. 顶部品牌条 -->
   <div class="brand-bar">
     <div class="brand-name">Darwin<span class="dot">.</span>skill</div>
-    <div class="brand-date" data-field="date">2026.06.01</div>
+    <div class="brand-date" data-field="date">2026.06.02</div>
   </div>
 
   <!-- 2. 核心成就区 -->
@@ -469,7 +469,7 @@
       </svg>
       <div class="ring-center">
         <div>
-          <span class="ring-score" data-field="score-after">86.5</span><span class="ring-max">/100</span>
+          <span class="ring-score" data-field="score-after">80</span><span class="ring-max">/100</span>
         </div>
         <div class="ring-label">质量总分</div>
       </div>
@@ -478,14 +478,14 @@
     <div class="hero-text">
       <div class="hero-title">
         我的Skill进化报告<br>
-        <span class="hero-skill-name" data-field="skill-name">moss-mem 记忆仓库</span>
+        <span class="hero-skill-name" data-field="skill-name">moss-mem v4</span>
       </div>
       <div class="hero-journey">
-        从 <strong data-field="score-before">81.1</strong> 分进化到 <strong>87</strong> 分<br>
-        <span style="color:#999;font-size:14px;" data-field="skill-id">auto-optimize/20260601-moss-mem-philosophy</span>
+        从 <strong data-field="score-before">74</strong> 分进化到 <strong>87</strong> 分<br>
+        <span style="color:#999;font-size:14px;" data-field="skill-id">moss-mem</span>
       </div>
       <div class="delta-badge">
-        <span data-field="score-delta">+5.4</span>
+        <span data-field="score-delta">+5.9</span>
         <span class="delta-badge-label">分</span>
       </div>
     </div>
@@ -495,25 +495,25 @@
   <div class="breakthrough-section">
     <div class="breakthrough-card primary">
       <div class="breakthrough-label">最大突破</div>
-      <div class="breakthrough-dim" data-field="top1-name">架构哲学 D7</div>
+      <div class="breakthrough-dim" data-field="top1-name">show 极简（fast-path）</div>
       <div class="breakthrough-score-row">
-        <span class="breakthrough-from" data-field="top1-from">7</span>
+        <span class="breakthrough-from" data-field="top1-from">3/10</span>
         <span class="breakthrough-arrow">&rarr;</span>
-        <span class="breakthrough-to" data-field="top1-to">9</span>
+        <span class="breakthrough-to" data-field="top1-to">9/10</span>
       </div>
-      <div class="breakthrough-pct" data-field="top1-pct">+28.6%</div>
-      <div class="breakthrough-story" data-field="top1-story">TL;DR+Philosophy 引入「货架 vs 仓库」比喻，让 MemPalace 从「可选附加」升格为「记忆仓库」</div>
+      <div class="breakthrough-pct" data-field="top1-pct">+200%</div>
+      <div class="breakthrough-story" data-field="top1-story">「上次做到哪了」从 6 步 context recovery 收敛为 1 步 show，撞线比 baseline 还短</div>
     </div>
     <div class="breakthrough-card secondary">
       <div class="breakthrough-label">第二突破</div>
-      <div class="breakthrough-dim" data-field="top2-name">Frontmatter D1</div>
+      <div class="breakthrough-dim" data-field="top2-name">start 0 字段启动</div>
       <div class="breakthrough-score-row">
-        <span class="breakthrough-from" data-field="top2-from">8</span>
+        <span class="breakthrough-from" data-field="top2-from">5/10</span>
         <span class="breakthrough-arrow">&rarr;</span>
-        <span class="breakthrough-to" data-field="top2-to">9</span>
+        <span class="breakthrough-to" data-field="top2-to">9/10</span>
       </div>
-      <div class="breakthrough-pct" data-field="top2-pct">+12.5%</div>
-      <div class="breakthrough-story" data-field="top2-story">把仓库比喻提到 description 顶部，agent 加载即看到读路径：warehouse→CLI→grep</div>
+      <div class="breakthrough-pct" data-field="top2-pct">+80%</div>
+      <div class="breakthrough-story" data-field="top2-story">新项目可 0 字段追问直接 state set 启动，fire-and-forget + update 补全</div>
     </div>
   </div>
 
@@ -592,9 +592,9 @@
   <div class="summary-section">
     <div class="summary-header">关键改进</div>
     <div class="summary-items">
-      <div class="summary-item" data-field="improve-1">TL;DR 加上 ASCII 数据流图，明确写：WRITE→货架，READ→仓库</div>
-      <div class="summary-item" data-field="improve-2">Memory Layer Philosophy 从 5 条扩为 6 条，开头 mental model 先行</div>
-      <div class="summary-item" data-field="improve-3">端到端 smoke test 验证 file-only 模式全 lifecycle 可用</div>
+      <div class="summary-item" data-field="improve-1">SKILL.md 800→337 行（-58%），冗余设计段、MemPalace 工具表、philosophy 段全去重</div>
+      <div class="summary-item" data-field="improve-2">双层状态架构（.moss-mem/ 项目 + .harness/ 会话），隐喻从 shelves/warehouse 升级为清晰边界</div>
+      <div class="summary-item" data-field="improve-3">声明式 state set/commit API 替代命令式 start/update/complete，旧命令全保留为 alias</div>
     </div>
   </div>
 

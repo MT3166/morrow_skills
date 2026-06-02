@@ -970,8 +970,8 @@ def main():
     subparsers.add_parser("init", help="Initialize MEMORY.md and .moss-mem/tasks/")
 
     start_parser = subparsers.add_parser("start", help="Start a new task")
-    start_parser.add_argument("--description", "-d", required=True, help="Task description")
-    start_parser.add_argument("--next-step", "-n", required=True, help="Next step instruction")
+    start_parser.add_argument("--description", "-d", required=False, default="(待补)", help="Task description; defaults to placeholder you can fill in via update")
+    start_parser.add_argument("--next-step", "-n", required=False, default="等待下一步指令", help="Next step instruction; defaults to placeholder you can fill in via update")
 
     update_parser = subparsers.add_parser("update", help="Update task progress")
     update_parser.add_argument("--description", "-d", required=True, help="Progress description")
@@ -1013,6 +1013,36 @@ def main():
     summary_parser.add_argument("--next-step", "-n", default="", help="Next concrete step")
     summary_parser.add_argument("--related", default="", help="Comma-separated related file paths")
 
+    # ── v4: declarative state subcommand ──
+    state_parser = subparsers.add_parser("state", help="Declarative state API (v4)")
+    state_subs = state_parser.add_subparsers(dest="state_action", help="State actions")
+
+    state_subs.add_parser("init", help="Initialize MEMORY.md and .moss-mem/ (alias for 'init')")
+    state_subs.add_parser("show", help="Show current task (alias for 'show')")
+
+    state_set_parser = state_subs.add_parser("set", help="Set one or more state fields (key=value pairs)")
+    state_set_parser.add_argument("pairs", nargs="*", help="Field assignments like current_task=\"...\" next_step=\"...\"")
+    # Legacy friendly flags — still supported for compatibility
+    state_set_parser.add_argument("--description", "-d", default=None, help="= current_task")
+    state_set_parser.add_argument("--next-step", "-n", default=None, help="= next_step")
+    state_set_parser.add_argument("--status", "-s", default=None, help="Status emoji")
+    state_set_parser.add_argument("--last-action", "-l", default=None)
+    state_set_parser.add_argument("--key-decisions", "-k", default=None)
+    state_set_parser.add_argument("--landmines", "-m", default=None)
+
+    state_commit_parser = state_subs.add_parser("commit", help="Snapshot current state to a new task file")
+    state_commit_parser.add_argument("-m", "--message", required=True, help="One-line commit summary")
+
+    state_note_parser = state_subs.add_parser("note", help="Append timestamped note (alias for 'add-note')")
+    state_note_parser.add_argument("text", nargs="?", default=None, help="Note text (or pass via --note/-n)")
+    state_note_parser.add_argument("--note", "-n", default=None, help="Note content (legacy flag)")
+
+    state_validate_parser = state_subs.add_parser("validate", help="Validate handoff fields (alias for 'check')")
+    state_validate_parser.add_argument("--fix", action="store_true", help="Auto-fill from git")
+    state_validate_parser.add_argument("--file", "-f", default=None)
+
+    state_subs.add_parser("recover", help="Interrupt recovery (alias for 'recover')")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -1042,6 +1072,76 @@ def main():
         cmd_knowledge_check(getattr(args, 'strict', False))
     elif args.command == "summary-capture":
         cmd_summary_capture(args.topic, args.summary, args.source, args.decisions, args.next_step, args.related)
+    elif args.command == "state":
+        # ── v4 state dispatcher ──
+        action = getattr(args, "state_action", None)
+        if action is None:
+            state_parser.print_help()
+            sys.exit(1)
+
+        if action == "init":
+            cmd_init()
+        elif action == "show":
+            cmd_show(None)
+        elif action == "set":
+            # Auto-init: if MEMORY.md is missing, create it before setting fields.
+            # Lets a fresh project call `state set current_task="…"` as the very first
+            # command without a separate `state init` round-trip.
+            if not os.path.exists(MEMORY_FILE):
+                cmd_init()
+
+            # Collect field values: from pairs (k=v) and from legacy flags
+            # Map old field names to new schema
+            field_map = {
+                "current_task": args.description,
+                "next_step": args.next_step,
+                "status": args.status,
+                "last_action": args.last_action,
+                "key_decisions": args.key_decisions,
+                "landmines": args.landmines,
+            }
+            for pair in (args.pairs or []):
+                if "=" not in pair:
+                    print(f"[ERROR] state set expects key=value, got: {pair}")
+                    sys.exit(1)
+                k, _, v = pair.partition("=")
+                field_map[k.strip()] = v.strip().strip('"').strip("'")
+
+            # If status is being set, complete the task. Otherwise update.
+            if field_map.get("status") in ("✅", "✅ Completed"):
+                desc = field_map.get("current_task") or field_map.get("last_action") or "Completed"
+                cmd_complete(desc)
+            else:
+                # Treat as update — required: description + next_step + status
+                desc = field_map.get("current_task") or "(待补)"
+                nxt = field_map.get("next_step") or "等待下一步指令"
+                st = field_map.get("status") or "🔧 In Progress"
+                cmd_update(desc, nxt, st,
+                          field_map.get("last_action"),
+                          field_map.get("key_decisions"),
+                          field_map.get("landmines"))
+        elif action == "commit":
+            # Auto-init: same logic as `state set` — first commit on a fresh project
+            # should not require a separate `state init` round-trip.
+            if not os.path.exists(MEMORY_FILE):
+                cmd_init()
+            # commit = start a new task file with the current state
+            cmd_start(args.message, "继续推进")
+            # then update with the message as last_action
+            cmd_update(args.message, "继续推进", "🔧 In Progress", args.message, None, None)
+        elif action == "note":
+            text = args.text or args.note
+            if not text:
+                print("[ERROR] state note requires text argument or --note/-n")
+                sys.exit(1)
+            cmd_add_note(text)
+        elif action == "validate":
+            cmd_check(getattr(args, "file", None), getattr(args, "fix", False))
+        elif action == "recover":
+            cmd_recover()
+        else:
+            state_parser.print_help()
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)
