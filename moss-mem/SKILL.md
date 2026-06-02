@@ -1,794 +1,337 @@
 ---
 name: moss-mem
 description: >-
-  Memory warehouse for coding-agent sessions. **`.moss-mem/`** is the shelf
-  (files: tasks, summaries, index cache, archive, lock — always readable, no
-  service required); **MemPalace** is the warehouse that indexes the shelves
-  and is the primary way to *read back* (semantic search, temporal KG, diary,
-  wake-up). Writes go to the shelves; reads route through the warehouse first,
-  then loading dock (CLI), then `grep`. Degrades gracefully when MCP/CLI
-  unavailable.
-triggers:
-  # ── Task lifecycle ──
-  - start task
-  - new task
-  - begin task
-  - 开始任务
-  - update memory
-  - update task
-  - 进度更新
-  - 更新记忆
-  - complete task
-  - finish task
-  - 完成任务
-  - show task
-  - show memory
-  - 查看任务
-  - 当前状态
-  - 查看交接状态
-
-  # ── Memory initialization & maintenance ──
-  - initialize memory
-  - init memory
-  - 新项目初始化记忆
-  - check memory
-  - read memory
-  - 查看记忆
-  - add note
-  - scratchpad
-  - 笔记
-
-  # ── Search & discovery ──
-  - search memory
-  - find task
-  - 搜索记忆
-  - 找任务
-  - 查找
-  - mine memory
-  - 挖掘记忆
-
-  # ── Knowledge continuity ──
-  - link task
-  - relate task
-  - 关联任务
-  - agent diary
-  - session note
-  - harness summary
-  - session summary
-  - capture summary
-  - Codex harness
-  - OpenAI harness
-  - 会话笔记
-  - handoff
-  - 交接
-  - 接力
-  - context switch
-  - wake up
-  - 唤醒
-
-  # ── Memory layout management ──
-  - knowledge init
-  - init knowledge
-  - memory layout
-  - 初始化记忆布局
-  - knowledge index
-  - regenerate memory index
-  - knowledge check
-  - check memory layout
-  - 生成记忆索引
-  - 检查记忆布局
-  - capture belief
-  - record decision
-  - 记录决策
-version: "3.3.1"
+  Project memory that survives across coding-agent sessions. **`.moss-mem/`**
+  holds the cross-session project state (task handoff, key decisions,
+  landmines, generated index cache). Writes always go to `.moss-mem/`; reads
+  route through semantic search when available, file/grep otherwise. Single
+  declarative `state set/show/commit` API; legacy `start`/`update`/`complete`
+  remain as aliases. Triggers: start task, update task, complete task, handoff,
+  where am I, show memory, search memory, add note, knowledge init/index/check.
+version: "4.0.0"
 ---
 
-# moss-mem — Project Memory Management
+# moss-mem — Project memory across sessions
 
 ## TL;DR
 
-Think of `.moss-mem/` as the **shelves** of a memory warehouse, and **MemPalace** as the **warehouse itself**.
+moss-mem owns **`.moss-mem/`** (project state, persistent, cross-session). It
+does not own session-local state — that lives in `.harness/sessions/<id>/` and
+is the harness's responsibility, not moss-mem's.
 
-- **`.moss-mem/` is the shelves** — files on disk, always readable, no service required. This is the system of record. Writing always goes here first.
-- **`MEMORY.md` is the front-desk card** — the tiny index you read first to know where you left off (<80 lines, always loaded).
-- **MemPalace is the warehouse** — it indexes the shelves, builds a semantic + temporal knowledge graph, and is the **primary way to read back** what was stored. When the warehouse is open, route every retrieval (search, context, link, diary) through it. When it is closed, fall back to the shelves directly with `grep`. Never block a write because the warehouse is closed.
-
-```
-       WRITE                                       READ
-         │                                           │
-         ▼                                           ▼
-   .moss-mem/  ── mempalace mine ──▶  MemPalace  ── mempalace_search / diary_read / kg_query ──▶  you / next agent
-   (the shelves)        (stock the      (the warehouse)        (query the warehouse)              (read through the
-                          warehouse)                                                              warehouse, not
-                                                                                                 by shelf-climbing)
-   + MEMORY.md
-     (front-desk card)
-```
-
-`AGENTS.md` and project docs are external read-only context when present; moss-mem does not create or manage them.
-
-Setup: `python3 {base}/scripts/memory_manager.py init && python3 {base}/scripts/memory_manager.py knowledge-init && mempalace mine .moss-mem/ --wing <project>`.
-
-### Quick Dispatch
-
-| User intent | Primary command | Deep reference |
-|------------|----------------|----------------|
-| Start task | `python3 {base}/scripts/memory_manager.py start` （`-d`/`-n` 都可选，缺省占位 `(待补)` / `等待下一步指令`，用 `update` 补全） | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
-| Update progress | `python3 {base}/scripts/memory_manager.py update -d "…" -n "…" -s "🔧"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
-| Complete task | `check` → `check --fix` → `update -l/-k/-m` → `complete` | [Agent Handoff Protocol](#agent-handoff-protocol) |
-| Search memory | `mempalace_search query="…"` → fallback: `grep -r "…" .moss-mem/` | [MCP search](#search--hybrid-vector-search) |
-| Context recovery | `show` → `diary_read` → `search` → `kg_query` → synthesize | [MCP context](#context--rich-context-recovery) |
-| 「我做到哪了」/ 上次任务 | `python3 {base}/scripts/memory_manager.py show`（**1 步 fast-path，优先**） | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
-| Handoff | `check` → `check --fix` → `update -l/-k/-m` → diary → `complete` → sync → `start` | [Agent Handoff Protocol](#agent-handoff-protocol) |
-| Record decision | `python3 {base}/scripts/memory_manager.py update -d "…" -n "…" -s "🔧" -k "…"` | [Task Lifecycle](#task-lifecycle-file-based-always-available) |
-| Session summary | `python3 {base}/scripts/memory_manager.py summary-capture -t "…" -s "…"` | [Knowledge Operations](#knowledge-operations) |
-
-## Decision Tree
+- **Write**: always to `.moss-mem/`. The file is the system of record.
+- **Read**: semantic search if MemPalace MCP is up; file/grep otherwise.
+- **API**: declarative `state set current_task="…" next_step="…"` — one verb
+  covers start/update/complete. Aliases (`start`/`update`/`complete`) keep
+  existing scripts working.
 
 ```
-User intent → primary path (MCP) → fallback (CLI) → last resort (file/grep)
-
-"start task X"
-  python3 {base}/scripts/memory_manager.py start [-d "X" -n "next step"]   # -d/-n 都可选；缺省时用 "(待补)" / "等待下一步指令"，用 update 补全
-  → MCP: mempalace_check_duplicate → mempalace_add_drawer room:tasks
-  → CLI: skip mirroring (batched later via mempalace mine)
-
-"update progress"
-  python3 {base}/scripts/memory_manager.py update -d "X" -n "Y" -s "🔧"
-  → MCP: if -k/-m non-empty, mempalace_add_drawer room:decisions/landmines + mempalace_kg_add
-  → CLI: skip mirroring
-
-"complete task"
-  check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → complete
-  → MCP: mempalace_update_drawer → mempalace_sync
-  → CLI: skip
-
-"search memory" / "find tasks about X"
-  MCP:   mempalace_search query="X" wing=<project> limit=10   → semantic (cosine)
-  CLI:   mempalace search "X" --wing <project>                → hybrid (cosine + BM25)
-  File:  grep -r "X" .moss-mem/tasks/                          → exact match only
-
-"link X to Y"
-  MCP:   mempalace_kg_add + mempalace_create_tunnel
-  File:  append to task file ## Key Decisions
-
-"diary"
-  MCP:   mempalace_diary_read / mempalace_diary_write (AAAK)
-  File:  moss-mem add-note "[DIARY] ..."
-
-"what were we working on?" / "我做到哪了" / "上次任务"
-  ► Fast-path first. Read MEMORY.md directly — 1 step, no script needed.
-  MCP:   show (MEMORY.md + active task file)
-  CLI:   show (same — file-based, no MCP/CLI distinction at this level)
-  File:  cat MEMORY.md  (or python3 {base}/scripts/memory_manager.py show)
-  Default rule: stop at show unless the user explicitly asks for "full context",
-  "recent activity", "related past work", or "everything". Escalating to the
-  6-step recovery on a one-line question is the over-engineering failure mode
-  this routing rule prevents.
-
-"context recovery" / "全面恢复上下文" / "previous work on X"
-  ► Only when user asks for more than the current pointer.
-  MCP:   show → diary_read → search → kg_query → traverse → synthesize
-  CLI:   show → mempalace wake-up --wing <project>
-  File:  show → grep .moss-mem/tasks/
-
-"handoff"
-  MCP:   check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → diary_write → complete → sync → start
-  CLI:   check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → complete → mine → start
-  File:  check → check --fix → update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l/-k/-m → complete → start
-
-"mine memory"
-  CLI:   mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>
-  MCP:   n/a (bulk operation — use CLI)
-
-"init knowledge" / "initialize memory layout"
-  python3 {base}/scripts/memory_manager.py knowledge-init [--domain <web|mobile|api|cli>]
-  → Compatibility alias for memory init only; --domain is ignored
-  → Creates MEMORY.md, .moss-mem/tasks/, .moss-mem/summaries/, .moss-mem/index-cache/
-  → Does not create, move, or edit AGENTS.md, ARCHITECTURE.md, or docs/
-
-"knowledge index" / "regenerate memory index"
-  python3 {base}/scripts/memory_manager.py knowledge-index
-  → Writes .moss-mem/index-cache/memory-index.md from .moss-mem/tasks/ and .moss-mem/summaries/
-
-"knowledge check" / "check memory layout"
-  python3 {base}/scripts/memory_manager.py knowledge-check [--strict]
-  → Validates memory layout only: MEMORY.md plus .moss-mem/tasks/, summaries/, and index-cache/
-  → Treats AGENTS.md as optional read-only external context when present
-
-"capture harness summary" / "session summary"
-  python3 {base}/scripts/memory_manager.py summary-capture -t "<topic>" -s "<summary>" \
-    --source codex-harness --decisions "<key decisions>" -n "<next step>" --related "file1,file2"
-  → Writes .moss-mem/summaries/YYYYMMDD-HHMMSS-<topic>.md
-  → Mine summaries with: mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
-
-"record decision" / "capture belief"
-  python3 {base}/scripts/memory_manager.py update -d "Recorded decision" -n "<next step>" -s "🔧" -k "<decision>"
-  → Stores moss-mem state in MEMORY.md and .moss-mem/ only
-  → If a separate project documentation system exists, treat it as external and follow explicit user/project instructions outside moss-mem
+.moss-mem/                                    .harness/sessions/<id>/
+──────────────────                            ─────────────────────────
+project state  ◀── moss-mem owns              session state ◀── harness owns
+cross-session                                 per-session
+persistent                                    ephemeral
 ```
 
-## Prerequisites
+**Rule of thumb**: if the next session needs it, write to `.moss-mem/`. If only
+this session needs it, leave it in `.harness/`.
 
-- Python 3.8+ (stdlib only). Run from **project root** (where MEMORY.md lives).
-- Script: `{base}/scripts/memory_manager.py` — `{base}` resolves from the `Base directory for this skill:` line in the runtime invocation header.
-- After forced termination (e.g. `kill -9` / `taskkill /F`): remove `.moss-mem/tasks/.edit_lock` (Unix: `rm`, Windows cmd: `del`, PowerShell: `Remove-Item`).
-- **MemPalace MCP** (primary): installed via `pip install mempalace`, initialized via `mempalace init <project_dir> --yes && mempalace mine .moss-mem/ --wing <project>`, then registered with the active coding runtime's MCP configuration. Mine only moss-mem memory paths unless the user explicitly asks to index external project docs.
-- **MemPalace CLI** (fallback): same binary — `mempalace --version` confirms availability.
+## Quick Dispatch
 
-### Authoritative References
+| Intent | Command | Notes |
+|---|---|---|
+| Where am I? | `python3 {base}/scripts/memory_manager.py state show` | 1 step; reads MEMORY.md + active task file |
+| Set state | `python3 {base}/scripts/memory_manager.py state set current_task="…" next_step="…"` | Declarative, idempotent, 0 round-trips; missing keys use placeholders |
+| Commit snapshot | `python3 {base}/scripts/memory_manager.py state commit -m "auth: 60% done"` | Writes task file + updates MEMORY.md pointer |
+| Search memory | `mempalace_search query="…"` (MCP) → `mempalace search "…"` (CLI) → `grep -r "…" .moss-mem/` (file) | Degrade through 3 tiers |
+| Add note | `python3 {base}/scripts/memory_manager.py state note "found race in token refresh"` | Timestamped scratchpad |
+| Validate handoff | `python3 {base}/scripts/memory_manager.py state validate [--fix]` | Check handoff fields; `--fix` auto-fills from git |
+| Init | `python3 {base}/scripts/memory_manager.py state init` | Create `.moss-mem/` + MEMORY.md |
+| Regenerate index | `python3 {base}/scripts/memory_manager.py knowledge-index` | Rebuild `.moss-mem/index-cache/memory-index.md` |
+| Check layout | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate memory paths exist |
+| **Legacy aliases** | `start` / `update` / `complete` / `show` / `add-note` / `init` | All remain functional; internally map to `state *` |
 
-These external sources stay current independently — prefer them over hardcoded instructions when in doubt:
+## Architecture
 
-| Resource | What it provides | When to use |
-|----------|-----------------|-------------|
-| `mempalace instructions init` | Latest init workflow | Setup troubleshooting |
-| `mempalace instructions search` | Latest search guidance | Search syntax questions |
-| `mempalace instructions mine` | Latest mining modes + flags | Mine configuration |
-| `mempalace instructions status` | Latest status interpretation | Palace health check |
-| `mempalace instructions help` | Full CLI reference | Discovery / unknown features |
-| `mempalace_get_aaak_spec` (MCP) | Authoritative AAAK format spec | Diary entry format questions |
-| `mempalace --help` | Top-level subcommand list | Quick refresh |
+### State schema
 
-## Availability Detection
+The current task is a flat key-value record with this contract:
 
-Check once per session:
+| Field | Type | Required | Default | Purpose |
+|---|---|---|---|---|
+| `current_task` | string | optional | `(待补)` | What the task aims to achieve |
+| `next_step` | string | optional | `等待下一步指令` | Precise next action (file:line or function) |
+| `status` | enum | yes | `🔧` | `🔧 In Progress` / `✅ Completed` / `❌ Blocked` |
+| `last_action` | string | optional | `<!-- pending -->` | What was just done (file:line, concrete) |
+| `key_decisions` | list[string] | optional | `<!-- pending -->` | Architectural choices + rationale (do not revert) |
+| `landmines` | list[string] | optional | `<!-- none -->` | Fragile areas, known issues, avoid unless instructed |
+| `created` | ISO timestamp | auto | — | Set on commit |
 
-```
-1. Try mempalace_status (MCP tool) → success = enhanced mode
-2. If MCP tool not found / timeout:
-   Try mempalace --version (CLI) → success = cli-fallback mode
-3. If neither available → file-only mode
-```
+`state set k=v k2=v2` is the only mutating verb. The same call works for
+"start a new task", "update progress", and "complete": you just set the fields
+to their new values. There is no lifecycle event distinct from "the agent
+called `state set`".
 
-In enhanced and cli-fallback modes, `mempalace instructions help` provides a current capability overview — use it when unsure about available subcommands.
+### Ownership boundary
 
-| Mode | Search | KG | Diary | Mirroring | Context Recovery |
-|------|--------|----|-------|-----------|-----------------|
-| **enhanced** (MCP) | semantic | temporal graph | AAAK entries | real-time | multi-tool orchestration |
-| **cli-fallback** | hybrid (cosine+BM25, CLI) | via extract general | scratchpad notes | batched (mine) | wake-up snapshot |
-| **file-only** | grep | manual annotation | add-note [DIARY] | none | grep |
+| Path | Owned by | moss-mem behavior |
+|---|---|---|
+| `MEMORY.md` | moss-mem | Read/write only via `state *` commands |
+| `.moss-mem/tasks/` | moss-mem | Read/write only via `state *` |
+| `.moss-mem/summaries/` | moss-mem | Imported harness summaries; read/write via `summary-capture` |
+| `.moss-mem/index-cache/` | moss-mem | Generated cache; never hand-edit |
+| `.harness/sessions/<id>/` | harness | moss-mem never reads or writes here |
+| `AGENTS.md` | project (external) | moss-mem treats as optional read-only context if present |
+| Project docs / `docs/`, `ARCHITECTURE.md`, etc. | project (external) | moss-mem does not create, move, edit, or require them |
 
-## Memory Layer — Owned Repository State
+### Search & retrieval
 
-moss-mem owns only two repository locations:
+Three tiers, in priority order. The first that works wins; the agent does not
+need to try later tiers unless the first returns nothing.
 
-- `MEMORY.md` — tiny startup state: current pointer, last action, next step.
-- `.moss-mem/**` — project-local memory store for task files, summaries, archives, locks, and generated memory index cache.
+1. **MCP** — `mempalace_search query="…" wing=<project> [limit=10] [max_distance=1.5]`
+   - Semantic (ChromaDB) plus optional wing/room filters
+2. **CLI** — `mempalace search "…" --wing <project> [--room=…] [--results=10]`
+   - Hybrid cosine + BM25
+3. **File** — `grep -r "…" MEMORY.md .moss-mem/`
+   - Exact match only
 
-Everything else is external context. `AGENTS.md`, architecture notes, product specs, design docs, plan docs, and root documentation trees may exist in a project, but moss-mem does not create, move, edit, require, or validate them. MemPalace indexes files and adds semantic/KG/diary retrieval; it never replaces files as the source of truth.
-
-### Directory Structure
-
-```
-MEMORY.md
-.moss-mem/
-  tasks/
-    MEMORY_ARCHIVE.md
-    archive/
-    .edit_lock
-  summaries/
-  index-cache/
-```
-
-### Ownership Rules
-
-| Path | moss-mem behavior | Do not put here |
-|------|-------------------|-----------------|
-| `MEMORY.md` | Current task pointer, next step, last action, compact scratchpad | Long explanations, specs, architecture essays |
-| `.moss-mem/tasks/` | Active/archive task handoff files and `MEMORY_ARCHIVE.md` | Broad project docs or product/design plans |
-| `.moss-mem/summaries/` | Imported harness/session summaries | Permanent project documentation that must live elsewhere |
-| `.moss-mem/index-cache/` | Generated memory index cache | Hand-authored doctrine |
-| `AGENTS.md` | Optional read-only external context if present | moss-mem-created or moss-mem-edited content |
-| Project docs | Optional read-only external context if present | moss-mem state |
-
-### Knowledge Operations
-
-**knowledge-init** — Compatibility alias for memory init
-```
-python3 {base}/scripts/memory_manager.py knowledge-init [--domain web|mobile|api|cli]
-```
-Creates `MEMORY.md`, `.moss-mem/tasks/`, `.moss-mem/summaries/`, and `.moss-mem/index-cache/`. It does not create `AGENTS.md`, `ARCHITECTURE.md`, or `docs/`. The optional `--domain` flag is accepted only for compatibility and does not scaffold project documentation.
-
-**knowledge-index** — Regenerate memory index
-```
-python3 {base}/scripts/memory_manager.py knowledge-index
-```
-Regenerates `.moss-mem/index-cache/memory-index.md` from `.moss-mem/tasks/` and `.moss-mem/summaries/`. The generated index is a cache; do not hand-edit it as doctrine.
-
-**knowledge-check** — Validate memory layout only
-```
-python3 {base}/scripts/memory_manager.py knowledge-check [--strict]
-```
-Validates memory layout only: `MEMORY.md`, `.moss-mem/tasks/`, `.moss-mem/tasks/MEMORY_ARCHIVE.md`, `.moss-mem/summaries/`, `.moss-mem/index-cache/`. `AGENTS.md` is optional read-only context.
-
-**summary-capture** — Store harness/session summaries
-```
-python3 {base}/scripts/memory_manager.py summary-capture \
-  --topic "auth refactor" \
-  --summary "Refactored JWT middleware; tests pending" \
-  --source codex-harness \
-  --decisions "Token stays in httpOnly cookie" \
-  --next-step "Run auth integration tests" \
-  --related "src/auth.py,tests/test_auth.py"
-```
-Writes `.moss-mem/summaries/YYYYMMDD-HHMMSS-auth-refactor.md`. Before handoff, mine summaries into MemPalace:
-```
-mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
-```
-
-### Memory Layer Philosophy
-
-The mental model: **`.moss-mem/` are the shelves. MemPalace is the warehouse. You read through the warehouse, you write to the shelves.**
-
-1. **Shelves vs. warehouse**: `.moss-mem/**` is the **shelf** — raw files on disk, always readable, no service required. MemPalace is the **warehouse** — indexed, searchable, graph-aware, queryable. They are not the same thing. The shelves hold the truth; the warehouse makes the truth findable.
-2. **Files are authoritative, always**: `MEMORY.md` and `.moss-mem/**` are the system of record. The warehouse mirrors them; if a drawer and a file disagree, the file wins. Never edit a drawer as if it were a source file.
-3. **Read through the warehouse, write to the shelves**: when MemPalace is available, route every retrieval (`search`, `context`, `link`, `diary`) through it — that is the whole point of stocking the warehouse. Fall back to `grep` on the shelves only when the warehouse is closed. **Never let a closed warehouse block a write** — the shelves are always there.
-4. **Memory-only ownership**: moss-mem owns only `MEMORY.md` and `.moss-mem/**`. It never creates or requires root project docs, architecture docs, product specs, design docs, quality docs, or broad harness scaffolds. Treat `AGENTS.md` and project docs as optional read-only context when present; do not mutate them as part of moss-mem.
-5. **One shelf, one job**: task handoff files → `.moss-mem/tasks/`; session summaries → `.moss-mem/summaries/`; generated memory index cache → `.moss-mem/index-cache/`. Don't mix.
-6. **Graceful degradation in three steps**: warehouse open (MCP, full semantic + KG + diary) → loading dock (CLI, hybrid cosine+BM25 + mine) → shelf-climbing (`grep`, exact match only). At every step, the next task can still be recorded.
+For semantic tools, KG, diary, and the full 30-tool MemPalace surface, see
+[`references/mempalace-tools.md`](references/mempalace-tools.md). Live source
+of truth: `mempalace instructions help`.
 
 ## Operations
 
-### Task Lifecycle (file-based, always available)
+### `state show` — read current state
 
-**start**
 ```
-python3 {base}/scripts/memory_manager.py start [-d "Description" -n "Next step instruction"]
-```
-Both `-d` and `-n` are **optional**; missing values use the placeholders `(待补)` and `等待下一步指令` so you can fire-and-forget start a task and fill the details in via `update` later. Creates `.moss-mem/tasks/YYYYMMDD-HHMMSS_task.md`, updates MEMORY.md pointer. Status → 🔧.
-
-Enhanced (MCP): `mempalace_check_duplicate` → `mempalace_add_drawer wing=<project> room=tasks`. Skip on failure.
-
-**update**
-```
-python3 {base}/scripts/memory_manager.py update -d "Progress" -n "Next step" -s "🔧"
+python3 {base}/scripts/memory_manager.py state show
 ```
 
-Handoff fields:
+Prints the current task pointer (from `MEMORY.md`) and the active task file's
+filled sections. **Stop here for "where am I?" / "what was I doing?"**
+questions. Do not escalate to 6-step context recovery unless the user explicitly
+asks for "full context" / "related past work" / "everything".
+
+### `state set` — set fields (the only mutating verb)
+
 ```
--l "Last action: refactored auth.py:login() — extracted token validation"
--k "JWT in httpOnly cookie, not localStorage — do not revert"
--m "auth.py:45-60 untested — do not modify until tests added"
+python3 {base}/scripts/memory_manager.py state set current_task="<X>" next_step="<Y>" [status="🔧"|"✅"|"❌"] [last_action="…"] [key_decisions="…"] [landmines="…"]
 ```
+
+Field behavior:
 
 | Flag | Omitted | `""` (empty) | Non-empty |
-|------|---------|--------------|-----------|
-| `-l` | Leave unchanged | → `<!-- pending -->` | Replace |
-| `-k` | Leave unchanged | → `<!-- pending -->` | Replace |
-| `-m` | Leave unchanged | → `<!-- none -->` | Replace |
+|---|---|---|---|
+| `current_task` | leave unchanged | → `(待补)` | replace |
+| `next_step` | leave unchanged | → `等待下一步指令` | replace |
+| `last_action` | leave unchanged | → `<!-- pending -->` | replace |
+| `key_decisions` | leave unchanged | → `<!-- pending -->` | replace |
+| `landmines` | leave unchanged | → `<!-- none -->` | replace |
+| `status` | leave unchanged | error | replace |
 
-Enhanced (MCP): when `-k`/`-m` non-empty → `mempalace_add_drawer room:decisions` / `room:landmines` + `mempalace_kg_add` with `valid_from` timestamp. Skip on failure.
+**Why one verb covers start/update/complete**: there is no "this is a new task"
+event distinct from "the agent changed the fields." A fresh project can call
+`state set current_task="first task"` and it works. A long-running task can
+call `state set last_action="refactored auth"` and it works. The contract is
+the same.
 
-**complete**
-```
-python3 {base}/scripts/memory_manager.py complete -d "Completion description"
-```
-Archives → `.moss-mem/tasks/archive/`, appends to `.moss-mem/tasks/MEMORY_ARCHIVE.md`, status → ✅.
-
-Enhanced (MCP): `mempalace_update_drawer` (mark complete) → `mempalace_sync project_dir=<project>` preview. Run `apply=true` only after the explicit 🛑 STOP confirmation in the Agent Handoff Protocol. Skip on failure.
-
-### Meta Operations (file-based)
-
-| Command | Python invocation | Purpose |
-|---------|------------------|---------|
-| **init** | `python3 {base}/scripts/memory_manager.py init` | Create MEMORY.md + .moss-mem/tasks/ |
-| **show** | `python3 {base}/scripts/memory_manager.py show [--file <path>]` | Print current or archived task file |
-| **add-note** | `python3 {base}/scripts/memory_manager.py add-note -n "Note"` | Timestamped scratchpad note |
-| **check** | `python3 {base}/scripts/memory_manager.py check [--fix]` | Verify handoff; `--fix` auto-fills from git |
-| **recover** | `python3 {base}/scripts/memory_manager.py recover` | Interrupt recovery: lock → completeness → git diff → git log → stash |
-| **knowledge-init** | `python3 {base}/scripts/memory_manager.py knowledge-init [--domain <type>]` | Compatibility alias for memory init; creates MEMORY.md + `.moss-mem/` only |
-| **knowledge-index** | `python3 {base}/scripts/memory_manager.py knowledge-index` | Regenerate `.moss-mem/index-cache/memory-index.md` from tasks and summaries |
-| **knowledge-check** | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate memory layout only |
-| **summary-capture** | `python3 {base}/scripts/memory_manager.py summary-capture -t "Topic" -s "Summary"` | Capture harness/session summary to `.moss-mem/summaries/` |
-
-### Invocation Rule
-
-Use the concrete Python subcommands above. Do not invent `--action` wrapper arguments; `memory_manager.py` does not implement a top-level `--action` dispatcher.
-
-## MCP Operations (primary path)
-
-### search — Hybrid vector search
-
-MCP:
-```
-mempalace_search query="<keywords>" wing=<project> [room=<room>] [limit=10] [max_distance=1.5]
-```
-
-- `limit` — results count (1-100, default 5)
-- `max_distance` — cosine distance threshold (lower = stricter)
-- `wing`/`room` — optional scope filters
-
-CLI:
-```
-mempalace search "<query>" --wing <project> [--room <room>] [--results 10]
-```
-
-- `--results` — max results (default 10)
-- Uses hybrid scoring: cosine similarity + BM25 keyword relevance
-
-Output (agent-formatted from MCP or CLI raw results):
-```
-## 🔍 MemPalace Search: "<query>" (wing=<project>)
-| Rel   | Content                                | Source      | Room      |
-|-------|----------------------------------------|-------------|-----------|
-| 0.53  | moss-mem SKILL.md — triggers for task  | SKILL.md    | moss_mem  |
-|       |   lifecycle, memory init, search...    |             |           |
-| 0.48  | CLAUDE.md — Project overview for       | CLAUDE.md   | skills    |
-|       |   morrow_skills extension repository   |             |           |
-
-3 results. Scores: cosine + BM25 (CLI) or cosine distance (MCP).
-Full drawer: mempalace_get_drawer drawer_id="<id>" (MCP) or re-search with --results 1.
-```
-
-CLI fallback: `mempalace search "<query>" --wing <project>` (hybrid vector+keyword, not full semantic).
-File fallback: `grep -r "<query>" MEMORY.md .moss-mem/tasks/ .moss-mem/tasks/MEMORY_ARCHIVE.md .moss-mem/summaries/` (exact string match only — no ranking).
-
-### link — Temporal knowledge graph
+### `state commit` — snapshot to disk
 
 ```
-1. Confirm: "Link 'rate-limiting' → relates_to → 'api-security'. OK?"
-2. mempalace_kg_add subject="rate-limiting" predicate="relates_to" object="api-security"
-   [valid_from="2026-05-11"] [source_drawer_id="<id>"]
-3. mempalace_create_tunnel source_wing=<p> source_room=tasks
-   target_wing=<p> target_room=tasks label="rate-limiting → api-security"
+python3 {base}/scripts/memory_manager.py state commit -m "<one-line summary>"
 ```
 
-Output: `🔗 Link Created: rate-limiting —[relates_to]→ api-security. KG edge (temporal) + tunnel.`
+Writes a timestamped file under `.moss-mem/tasks/`, updates the `MEMORY.md`
+pointer, and (in enhanced mode) mirrors to MemPalace. Use this when you have
+made changes you want to preserve across sessions.
 
-Query: `mempalace_kg_query entity="rate-limiting" [as_of="2026-06-01"] [direction="both"]`
-Invalidate: `mempalace_kg_invalidate subject="..." predicate="..." object="..."`
-
-CLI fallback: not available (KG is MCP-only). File fallback: append `Related: X → Y (relates_to)` to `## Key Decisions`.
-
-### diary — Agent session journal
+### `state note` — append to scratchpad
 
 ```
-Read:  mempalace_diary_read agent_name="<agent>" last_n=10 [wing=<project>]
-Write: mempalace_diary_write agent_name="<agent>" entry="<AAAK>" topic="<topic>" [wing=<project>]
-       → Draft entry, show user, confirm before writing.
+python3 {base}/scripts/memory_manager.py state note "<text>"
 ```
 
-Output (read):
-```
-## 📓 Agent Diary (last 10)
-| Date       | Topic        | Key Decisions / Actions         | ★   |
-|------------|-------------|---------------------------------|-----|
-| 2026-05-11 | auth-module | JWT in httpOnly cookies         | ★★★ |
-```
+Appends a timestamped entry to the active task's scratchpad. Use for
+session-local notes that don't justify a `commit`.
 
-AAAK format (built-in; full spec via `mempalace_get_aaak_spec`):
-```
-SESSION:YYYY-MM-DD|topic_code|KEY.dec:summary|LANDMINE:area|★★★
-```
-
-| Scenario | AAAK Example |
-|----------|-------------|
-| Feature built | `SESSION:2026-05-11\|auth.module\|built.JWT.middleware\|KEY.dec:cookies.over.localStorage\|★★★` |
-| Bug fixed | `SESSION:2026-05-11\|token.refresh\|fixed.race.condition\|LANDMINE:auth.py.L45-L60.untested\|★★★` |
-| Decision made | `SESSION:2026-05-11\|api.design\|KEY.dec:REST.over.GraphQL\|*confident*\|★★☆` |
-| Handoff | `SESSION:2026-05-11\|handoff\|completed.auth.module\|NEXT:test.login.flow\|★★★` |
-
-Proactive triggers: after milestone, architectural decision, blocker, session end, non-obvious bug fix.
-
-CLI fallback: `moss-mem add-note "[DIARY] <AAAK entry>"` (write) or read scratchpad `[DIARY]` entries (read).
-
-### context — Rich context recovery
+### `state validate [--fix]` — check handoff fields
 
 ```
-Step 1: moss-mem show                         ← current task pointer (always)
-Step 2: mempalace_diary_read last_n=10        ← recent session notes
-Step 3: mempalace_search query=<topic>         ← related past work
-Step 4: mempalace_kg_query entity=<project>    ← task relationship graph
-Step 5: mempalace_traverse start_room=<room> max_hops=2  ← connected rooms
-Step 6: Synthesize → template below
+python3 {base}/scripts/memory_manager.py state validate            # exit 0 = all filled
+python3 {base}/scripts/memory_manager.py state validate --fix      # auto-fill from git
 ```
 
-Output template:
-```
-## 📋 Context Recovery: <project>
+Exits 0 when `last_action`, `key_decisions`, and `landmines` are not
+placeholders. Use before `complete` (see Handoff Protocol).
 
-### 🎯 Current Task
-<Task description> | Next Step: <action> | Status: 🔧|✅|❌
-
-### 📝 Recent Activity
-| When      | What                           | Source     |
-|-----------|--------------------------------|------------|
-| <date>    | <latest diary or last action>  | diary/file |
-
-### 🔑 Key Decisions (do not revert)
-- <from task file + palace decisions>
-
-### ⚠️ Landmines
-- <from task file>
-
-### 🔗 Related Past Work
-<MCP: search results + kg edges + traversed rooms | grep matches>
-
-### 📚 Sources
-- <task file / diary entry / drawer ID / grep path used as evidence>
-
-### ▶️ Recommended Next Action
-<Single concrete next step>
-```
-
-CLI fallback: `moss-mem show` + `mempalace wake-up --wing <project>` (L0+L1 snapshot, ~600-900 tokens). File fallback: `show` + `grep`.
-
-Recovery quality: **Full** (MCP multi-tool) → **Snapshot** (CLI wake-up) → **Partial** (file + grep) → **Minimal** (file only, empty handoff).
-
-## CLI Operations (fallback + maintenance)
-
-These run when MCP is unavailable, or for maintenance operations that have no MCP equivalent.
-
-### mine — Bulk ingest into palace
+### `state init` — first-time setup
 
 ```
-# Mine moss-mem memory store only
-mempalace mine .moss-mem/ --wing <project>
-
-# Mine task files with auto-classification → decisions / milestones / problems
-mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>
-
-# Mine session summaries
-mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>
-
-# Preview
-mempalace mine .moss-mem/ --wing <project> --dry-run
+python3 {base}/scripts/memory_manager.py state init
 ```
 
-Auto-classification (`--mode convos --extract general`) extracts into rooms: `decisions`, `milestones`, `problems`. Use this when MCP mirroring was skipped (e.g., long CLI-fallback session) to batch-sync file state into palace.
+Creates `MEMORY.md` and `.moss-mem/{tasks,summaries,index-cache}`. Does not
+create `AGENTS.md`, `ARCHITECTURE.md`, or `docs/`.
 
-Run after every 3-5 completed tasks, or before handoff in CLI-fallback mode.
-
-### wake-up — Context snapshot
-
-```
-mempalace wake-up [--wing <project>]
-```
-
-Returns structured context (~800 tokens): `L0 — IDENTITY` (from `~/.mempalace/identity.txt`) + `L1 — ESSENTIAL STORY` (recent drawer summaries grouped by room). Primary context recovery when MCP is down. Also useful as a fast sanity check even in enhanced mode.
-
-### status — Palace health
+### `summary-capture` — import harness summaries
 
 ```
-mempalace status
+python3 {base}/scripts/memory_manager.py summary-capture \
+  -t "<topic>" -s "<summary>" --source codex-harness \
+  --decisions "<key decisions>" -n "<next step>" --related "<file1,file2>"
 ```
 
-Shows wings, rooms, drawer counts. Use to verify palace state.
+Writes `.moss-mem/summaries/YYYYMMDD-HHMMSS-<topic>.md`. After capture, mine
+into MemPalace with `mempalace mine .moss-mem/summaries/ --wing <project>`.
 
-### repair — Index maintenance
-
-```
-mempalace repair [--yes] [--dry-run]
-mempalace repair-status
-```
-
-- `repair` — rebuild ChromaDB vector index
-- `repair-status` — compare sqlite vs HNSW counts (read-only)
-
-### compress — Storage optimization
+### `knowledge-index` / `knowledge-check` — index cache maintenance
 
 ```
-mempalace compress --wing <project> [--dry-run]
+python3 {base}/scripts/memory_manager.py knowledge-index     # regenerate .moss-mem/index-cache/memory-index.md
+python3 {base}/scripts/memory_manager.py knowledge-check     # validate memory paths exist
 ```
 
-AAAK compression (~30x reduction). Preview with `--dry-run` first.
+`knowledge-index` is the only writer of `.moss-mem/index-cache/`. Never
+hand-edit the generated index.
 
-### hook run — Session lifecycle (harness integration)
+## Handoff Protocol
+
+For session-end or task-completion handoffs, follow this 4-step flow. Each step
+has a gate; never skip a gate.
 
 ```
-echo '{"session_id":"<id>","stop_hook_active":false,"transcript_path":"<path>"}' \
-  | mempalace hook run --hook session-stop --harness <runtime>
+Step 1: state validate
+        Gate: exit 0 = handoff fields filled → proceed to Step 4
+              exit 1 = fields incomplete → continue to Step 2
+
+Step 2: state validate --fix
+        Gate: re-run state validate
+              exit 0 → proceed to Step 4
+              exit 1 → continue to Step 3
+
+Step 3: state set last_action="…" key_decisions="…" landmines="…"
+        Gate: state show — verify the three fields are not placeholders
+              filled → proceed to Step 4
+              still pending → repeat Step 3 with remaining fields
+
+Step 4: state set status="✅" && state commit -m "<handoff summary>"
+        Gate: state show --archived — verify the task moved to archive
+              MEMORY.md status is ✅ → handoff complete
 ```
 
-Typically configured as the active runtime's session-stop / compact hooks — not invoked manually. Listed here for completeness.
-
-## MCP Quick Reference
-
-For the full MemPalace tool catalog (30 tools: 19 read + 11 write) with parameters, see
-[`references/mempalace-tools.md`](references/mempalace-tools.md). This section
-keeps only the confirmation checkpoint table — the part you actually need at write time.
-
-> Live source of truth: `mempalace instructions help` and `mempalace --help`.
-> Tool names/parameters may shift across versions; the reference file is a snapshot.
-
-### Confirmation Checkpoints
-
-**🔴 CHECKPOINT / 🛑 STOP rules**
-- 🔴 CHECKPOINT: show the exact proposed persistent write, then wait for user confirmation.
-- 🛑 STOP: do not run destructive operations until the user explicitly confirms the preview.
-
-| Operation | Confirm? | Marker | Rationale |
-|-----------|----------|--------|-----------|
-| Read tools (search, get_drawer, list_*, kg_query, diary_read, traverse) | No | — | Read-only |
-| add_drawer / update_drawer (mirroring) | No | — | Best-effort cache; file is system of record |
-| delete_drawer / delete_tunnel | **Yes** | 🛑 STOP | Irreversible |
-| kg_add / kg_invalidate / create_tunnel | **Yes** | 🔴 CHECKPOINT | Persistent graph changes |
-| diary_write | **Yes** | 🔴 CHECKPOINT | Permanent diary entry |
-| sync (apply=true) | **Yes** | 🛑 STOP | Destructive pruning |
+🔴 Step 3 (writing `key_decisions` / `landmines`) is a **CHECKPOINT** — draft
+the values, show the user, then write. 🛑 `complete` is destructive (moves the
+file to archive) — confirm before running.
 
 ## Anti-Patterns / Blacklist
 
-Do not do these during moss-mem operations:
-
 | Anti-pattern | Required alternative |
-|--------------|----------------------|
-| Create, move, or edit `AGENTS.md` as part of moss-mem | Read it only if present and useful; treat it as agent-owned external context |
-| Create root `docs/`, `ARCHITECTURE.md`, product specs, design docs, or plan docs as part of moss-mem | Keep moss-mem scoped to `MEMORY.md` and `.moss-mem/**`; follow separate explicit project-doc requests outside moss-mem |
-| Store moss-mem state outside `.moss-mem/` except `MEMORY.md` | Move task, summary, archive, lock, and generated index state under `.moss-mem/` |
-| Treat MemPalace as the source of truth | Keep files authoritative: `MEMORY.md` and `.moss-mem/**` own moss-mem state; MemPalace mirrors/searches them |
-| Store decisions only in diary, KG, or palace drawers | Record moss-mem handoff decisions in `.moss-mem/tasks/` via `update -k`; follow separate explicit project-doc instructions outside moss-mem if needed |
-| Run `mempalace_sync apply=true`, `delete_drawer`, or `delete_tunnel` from memory | Preview first, show what will be removed, then wait at the 🛑 STOP gate |
-| Manually edit generated `.moss-mem/index-cache/memory-index.md` as doctrine | Update `.moss-mem/tasks/` or `.moss-mem/summaries/`, then run `knowledge-index` and `knowledge-check` |
-| Skip handoff gates because a task looks small | Run `check`/`check --fix`, verify handoff fields, and confirm diary/sync gates before completing |
-| Let MCP/CLI failures block lifecycle writes | Degrade to file-only, finish the task update, and mine/sync later |
-| Use `--action <name>` wrapper arguments with `memory_manager.py` | Use the concrete subcommands listed in Meta Operations. `memory_manager.py` does not implement a top-level `--action` dispatcher |
+|---|---|
+| Create, move, or edit `AGENTS.md` as part of moss-mem | Read it only if present; treat as agent-owned external context |
+| Create root `docs/`, `ARCHITECTURE.md`, product specs as part of moss-mem | Keep moss-mem scoped to `MEMORY.md` and `.moss-mem/**` |
+| Store moss-mem state outside `.moss-mem/` | All task/summary/archive/lock/index under `.moss-mem/` |
+| Treat MemPalace as the source of truth | Files own state; MemPalace mirrors/searches them |
+| Store decisions only in diary/KG/palace drawers | Record handoff decisions via `state set key_decisions="…"` |
+| Run `mempalace_sync apply=true` / `delete_drawer` from memory | Preview first, then wait at the 🛑 STOP gate |
+| Hand-edit generated `.moss-mem/index-cache/memory-index.md` | Run `knowledge-index` to regenerate |
+| Skip handoff gates because a task looks small | Run `state validate`/`state validate --fix` before commit |
+| Let MCP/CLI failures block writes | Degrade to file-only, finish the state change, mine/sync later |
+| Read or write `.harness/sessions/<id>/` | That is harness territory, not moss-mem's |
 
-## Agent Handoff Protocol
+## If-Then Fallbacks
 
-Each step has a verification gate — confirm the output before proceeding. If any gate fails, fix the issue and re-run that step. Never skip gates.
+Use this table after a failed gate. Apply the first response once; if the same
+trigger remains, take the fallback path and continue the lifecycle in file-only
+mode rather than blocking.
+
+| Trigger | First response | Fallback if still failing |
+|---|---|---|
+| `MEMORY.md` missing | `python3 {base}/scripts/memory_manager.py state init` | Create the task with `state commit -m "…"`, then add the current pointer to `MEMORY.md` manually |
+| Stale `.edit_lock` after crash | `python3 {base}/scripts/memory_manager.py recover` | Remove `.moss-mem/tasks/.edit_lock` (Unix `rm`, Windows `del`), then `state validate --fix` |
+| MCP tool missing or timeout | Switch to CLI: `mempalace search "…"` | File-only: `grep -r "…" .moss-mem/`; record `[SYNC-PENDING]` in the task note; `mempalace mine` later |
+| `mempalace` CLI unavailable | Continue file-only after the Python command succeeds | Add note `[SYNC-PENDING] install/run mempalace`; mine `.moss-mem/` at handoff |
+| Search returns empty | Widen query or `max_distance`; try CLI `mempalace search` | File search over `MEMORY.md` and `.moss-mem/`; re-mine relevant memory files |
+| `memory-index.md` stale | `knowledge-index` then `knowledge-check` | Search `MEMORY.md` and `.moss-mem/` directly; mark `[INDEX-STALE]` in the active task |
+| Handoff fields incomplete | `state validate --fix` | Fill `last_action`/`key_decisions`/`landmines` via `state set`, then `state validate` |
+| `mempalace_sync` preview shows stale drawers | 🛑 STOP and show the preview | Skip `apply=true`; verify with `mempalace_get_drawer` or file search before pruning later |
+| `knowledge-check --strict` fails | Fix missing/stale memory paths or rerun `knowledge-init`/`knowledge-index` | Run non-strict `knowledge-check`; record layout issues as a task landmine; continue |
+
+## State file formats
+
+### `MEMORY.md`
 
 ```
-Step 1: moss-mem check
-        Gate: exit 0 = all handoff fields filled → proceed to step 5
-              exit 1 = fields incomplete → continue to step 2
-
-Step 2: moss-mem check --fix
-        Gate: re-run moss-mem check
-              exit 0 → proceed to step 5
-              exit 1 → continue to step 3
-
-Step 3: moss-mem update -d "Handoff fields filled" -n "<next step>" -s "🔧" -l "..." -k "..." -m "..."
-        Gate: moss-mem show — verify ## Last Action, ## Key Decisions, ## Landmines are not <!-- pending -->
-              filled → proceed to step 4
-              still pending → repeat step 3 with remaining fields
-
-Step 4: diary entry
-        MCP: draft AAAK → show user → confirm before mempalace_diary_write
-        CLI/file fallback: draft [DIARY] AAAK → show user → confirm before moss-mem add-note
-        🔴 CHECKPOINT Gate: confirmed → proceed to step 5
-
-Step 5: moss-mem complete -d "..."
-        Gate: moss-mem show --file .moss-mem/tasks/archive/<completed> — verify it was archived
-              MEMORY.md status shows ✅ → proceed to step 6
-
-Step 6a [MCP]: mempalace_sync project_dir=<project>     ← preview (no apply)
-               🛑 STOP: Show "N stale drawers would be pruned. OK?" and wait.
-               User confirms → mempalace_sync project_dir=<project> apply=true
-               Gate: mempalace_status — verify drawer count decreased
-
-Step 6b [CLI]: mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>
-               Gate: mempalace search "<recent task keyword>" --wing <project>
-                     results found → proceed to step 7
-                     empty → check mine output for errors
-
-Step 7: moss-mem start -d "..." -n "..."
-        Gate: moss-mem show — verify new task file created with correct Description + Next Step
+## Meta [Strict]            — project identity, tech stack, last update
+## 状态机 [Strict]           — current task pointer + status + last action
+## 下一步指令 [Strict]        — next actionable step (file:line or function)
+## 暂存与备忘区 [Free]        — free-form notes
+## 雷区与技术契约 [Strict]    — append-only constraints
+## 已归档任务 [Strict]        — archive index
 ```
 
-**Never skip gates.** A failed gate means the previous step didn't complete — fix and retry. 🔴 Step 4 (diary write or fallback add-note) and 🛑 Step 6a (sync apply=true) require explicit user confirmation.
+### Task file (`.moss-mem/tasks/YYYYMMDD-HHMMSS_task.md`)
+
+```
+## Description       ← current_task
+## Next Step         ← next_step
+## Status            ← 🔧 | ✅ | ❌
+## Last Action       ← last_action
+## Key Decisions     ← key_decisions (do not revert)
+## Landmines         ← landmines
+## Created           ← ISO timestamp
+```
+
+## Harness boundary
+
+moss-mem does not create, manage, or require `.harness/`. The harness owns:
+
+- `.harness/sessions/<id>/` — per-session working state
+- `.harness/hooks/`, `.harness/config.yaml` — harness internals
+- Session lifecycle events (start, stop, compact)
+
+When the user says "save this for next session", ask: will next session need it?
+If yes, write to `.moss-mem/`. If only this session, leave it in `.harness/`.
 
 ## First-Time Setup
 
-```
-# 1. Initialize memory system (always)
-python3 {base}/scripts/memory_manager.py init
+```bash
+# 1. Initialize memory
+python3 {base}/scripts/memory_manager.py state init
 
-# 2. Initialize memory layout (compatibility alias; optional --domain is ignored)
-python3 {base}/scripts/memory_manager.py knowledge-init [--domain web|mobile|api|cli]
-# → Creates MEMORY.md, .moss-mem/tasks/, .moss-mem/summaries/, .moss-mem/index-cache/
-# → Does not create or edit AGENTS.md, ARCHITECTURE.md, or docs/
-
-# 3. Install MemPalace
+# 2. Install MemPalace (optional — for semantic search)
 pip install mempalace
-
-# 4. Initialize palace and mine moss-mem memory only
 mempalace init <project_dir> --yes
 mempalace mine .moss-mem/ --wing <project_name>
 
-# 5. Register MCP server with your coding runtime when MCP is available
+# 3. Register MCP server with your coding runtime (when MCP available)
 #    Claude Code:  claude mcp add mempalace -- mempalace-mcp
 #    Codex:        codex mcp add mempalace
 #    Cursor et al: add to MCP configuration
 
-# 6. Initial memory check and mine
+# 4. Initial validation
 python3 {base}/scripts/memory_manager.py knowledge-check
 python3 {base}/scripts/memory_manager.py knowledge-index
 mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project_name>
 mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project_name>
 ```
 
-## Task File Format
-
-```
-## Description       ← What this task aims to achieve
-## Next Step         ← Precise next action (file:line or function)
-## Status            ← 🔧 In Progress | ✅ Completed | ❌ Blocked
-## Last Action       ← What was just done (file:line, concrete change)
-## Key Decisions     ← Architectural choices + rationale (do not revert)
-## Landmines         ← Fragile areas, known issues, avoid unless instructed
-## Created           ← ISO timestamp
-```
-
-## MEMORY.md Template
-
-```
-## Meta [Strict]           — project identity, tech stack, last update
-## 状态机 [Strict]          — current task pointer + status + last action
-## 下一步指令 [Strict]       — next actionable step (file:line or function)
-## 暂存与备忘区 [Free]       — free-form notes
-## 雷区与技术契约 [Strict]   — append-only constraints
-## 已归档任务 [Strict]       — archive index
-```
-
-## File Tree
-
-```
-MEMORY.md
-.moss-mem/
-  tasks/
-    MEMORY_ARCHIVE.md
-    archive/
-    .edit_lock
-  summaries/
-  index-cache/
-```
-
-## Troubleshooting
-
-### If-Then Fallbacks
-
-Use this table to choose the next branch after a failed gate. Apply the first response once; if the same trigger remains, take the fallback path and continue the task lifecycle in file-only mode rather than blocking.
-
-| Trigger | First response | Fallback if still failing |
-|---------|----------------|---------------------------|
-| `MEMORY.md` missing | Run `python3 {base}/scripts/memory_manager.py init` | Create the task with `start`, then add only the current pointer to `MEMORY.md` manually if init cannot run |
-| Stale `.edit_lock` after crash | Run `python3 {base}/scripts/memory_manager.py recover` | Remove `.moss-mem/tasks/.edit_lock`, then run `check --fix` before the next write |
-| MCP tool missing or timeout | Switch to CLI-fallback and run the equivalent `mempalace` command | Use file-only path; record skipped mirroring in the task note and batch `mempalace mine` later |
-| CLI `mempalace` unavailable | Continue file-only after the Python memory command succeeds | Add a note: `[SYNC-PENDING] install/run mempalace`, then mine `.moss-mem/` at handoff |
-| Search returns empty | Widen query or threshold; run CLI `mempalace search` | Run exact file search over `MEMORY.md` and `.moss-mem/`; then re-mine relevant memory files |
-| `.moss-mem/index-cache/memory-index.md` stale | Run `knowledge-index` then `knowledge-check` | Search `MEMORY.md` and `.moss-mem/` directly, and mark `[INDEX-STALE]` in the active task |
-| Handoff fields incomplete | Run `check --fix` | Fill `-l`, `-k`, and `-m` manually, then verify with `show` before `complete` |
-| `mempalace_sync` preview shows stale drawers | Stop at 🛑 STOP and show the preview | Skip `apply=true`; use `mempalace_get_drawer` or file search to verify before pruning later |
-| `knowledge-check --strict` fails | Fix missing/stale memory layout paths or rerun `knowledge-init`/`knowledge-index` | Run non-strict `knowledge-check`, record remaining layout issues as a task landmine, and continue |
-
-| Problem | Fix |
-|---------|-----|
-| MEMORY.md missing | `moss-mem init` |
-| Stale lock file | Remove `.moss-mem/tasks/.edit_lock` — see [Platform Notes](#platform-notes) for OS-specific commands |
-| Task pointer stale | `moss-mem show --file <path>` |
-| Empty handoff fields | `moss-mem check --fix` |
-| `.moss-mem/index-cache/memory-index.md` stale | `moss-mem knowledge-index` then `moss-mem knowledge-check` |
-| Memory layout missing | `moss-mem knowledge-init --domain <type>`; existing memory files are not overwritten |
-| Session killed mid-handoff | `moss-mem recover` then `moss-mem check --fix` |
-| Stale task (>7 days) | `moss-mem recover` → complete or restart |
-| MCP tools not found / timeout | Degrade to CLI-fallback; check the active runtime's MCP server list/config |
-| MCP `mempalace_status` hangs | File-only; check MCP server process |
-| MCP `mempalace_search` returns `[]` | Increase `max_distance`; CLI: `mempalace mine` to re-index |
-| MCP `mempalace_add_drawer` errors | Wing/room auto-created; retry or skip |
-| CLI `mempalace: command not found` | `pip install mempalace` |
-| CLI `mempalace search` returns nothing | `mempalace mine .moss-mem/tasks/ --mode convos --extract general --wing <project>` |
-| CLI `mempalace mine` fails | Disk space? Try `--limit 100`; check `mempalace repair-status` |
-| Vector index corrupted | `mempalace repair --yes` |
-| ChromaDB version mismatch | `mempalace migrate [--dry-run]` |
-
 ## Platform Notes
 
-Commands in this skill are written for Unix-like shells (macOS, Linux, Git Bash on Windows). On Windows (cmd.exe / PowerShell), use these equivalents:
-
 | Operation | Unix (macOS / Linux / Git Bash) | Windows cmd | Windows PowerShell |
-|-----------|-------------------------------|-------------|-------------------|
-| Python | `python3 {base}/scripts/memory_manager.py ...` | `python {base}/scripts/memory_manager.py ...` | `python {base}/scripts/memory_manager.py ...` |
+|---|---|---|---|
+| Python | `python3 {base}/scripts/memory_manager.py …` | `python {base}\scripts\memory_manager.py …` | `python {base}\scripts\memory_manager.py …` |
 | Search text | `grep -r "query" .moss-mem/` | `findstr /s "query" .moss-mem\*` | `Select-String -Path ".moss-mem\*" -Pattern "query"` |
 | Remove file | `rm .moss-mem/tasks/.edit_lock` | `del .moss-mem\tasks\.edit_lock` | `Remove-Item .moss-mem\tasks\.edit_lock` |
-| Force-kill process | `kill -9 <pid>` | `taskkill /F /PID <pid>` | `Stop-Process -Id <pid> -Force` |
+| Force-kill | `kill -9 <pid>` | `taskkill /F /PID <pid>` | `Stop-Process -Id <pid> -Force` |
 | List directory | `ls` | `dir` | `Get-ChildItem` |
 
-The `memory_manager.py` script uses Python stdlib only and runs on all three platforms. Forward slashes (`/`) in paths are normalized by Python on Windows; use backslashes only in native shell commands (cmd / PowerShell).
+`memory_manager.py` uses Python stdlib only. Forward slashes work on all
+platforms; use backslashes only in native shell commands.
 
 ## Skill Integration
 
-- **init skill**: After creating project structure, run `moss-mem init` then `moss-mem knowledge-init`.
-- **Any long task**: `start` → `update` → `check` before `complete`. Record moss-mem handoff decisions with `update -k` and summaries under `.moss-mem/`.
-- **Cross-session recovery**: `moss-mem context` (MCP multi-tool) or `moss-mem show` + `mempalace wake-up` (CLI snapshot). Use `.moss-mem/index-cache/memory-index.md` if generated.
-- **Setup**: `pip install mempalace && mempalace init <dir> --yes && mempalace mine .moss-mem/ --wing <project>`; register `mempalace-mcp` with the active runtime when MCP tools are available.
+- **init skill**: after creating project structure, run `moss-mem state init` then `moss-mem knowledge-init`.
+- **Any long task**: `state set current_task=… next_step=…` → work → `state validate` → `state commit`.
+- **Cross-session recovery**: `moss-mem state show` (1 step) is enough for "where am I?". For "show me everything", escalate to `mempalace wake-up --wing <project>` or 6-step context recovery via MemPalace MCP.
+- **Setup**: `pip install mempalace && mempalace init <dir> --yes && mempalace mine .moss-mem/ --wing <project>`; register `mempalace-mcp` when MCP available.
