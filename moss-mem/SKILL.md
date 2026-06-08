@@ -4,7 +4,7 @@ description: >-
   Project memory that survives across coding-agent sessions. **`.moss-mem/`**
   holds the cross-session project state (task handoff, key decisions,
   landmines, generated index cache). Writes always go to `.moss-mem/`; reads
-  route through semantic search when available, file/grep otherwise. Single
+  route through the `mempalace search` CLI, falling back to file/grep. Single
   declarative `state set/show/commit` API; legacy `start`/`update`/`complete`
   remain as aliases. Triggers: start task, update task, complete task, handoff,
   where am I, show memory, search memory, add note, knowledge init/index/check.
@@ -20,7 +20,7 @@ does not own session-local state — that lives in `.harness/sessions/<id>/` and
 is the harness's responsibility, not moss-mem's.
 
 - **Write**: always to `.moss-mem/`. The file is the system of record.
-- **Read**: semantic search if MemPalace MCP is up; file/grep otherwise.
+- **Read**: semantic search via the `mempalace search` CLI; fall back to file/grep.
 - **API**: declarative `state set current_task="…" next_step="…"` — one verb
   covers start/update/complete. Aliases (`start`/`update`/`complete`) keep
   existing scripts working.
