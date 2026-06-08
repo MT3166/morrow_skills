@@ -120,6 +120,26 @@ of truth: `mempalace instructions help`.
 > CLI directly. The reference file lists MCP tool names for users who wire
 > `mempalace-mcp` into their runtime; moss-mem does not require that wiring.
 
+**Small-palace guard**: when `mempalace` is indexed against < ~50 source files
+(typical for a fresh project), cosine scores cluster below 0.5 and BM25
+dominates — but result-card templates / test fixtures can still rank above
+real memory. If `mempalace search` returns:
+- **0 results** → fall back to `grep -r "…" MEMORY.md .moss-mem/` (always)
+- **top cosine < 0.5** AND **< 3 results** → fall back to `grep` and label
+  the mempalace output as `low-confidence`
+- **top cosine ≥ 0.5** OR **≥ 3 results** → mempalace output is trustworthy
+
+When you `mine`, restrict scope so the palace never indexes HTML templates
+or test fixtures:
+
+```
+mempalace mine .moss-mem/tasks/ .moss-mem/summaries/ --wing <project>
+mempalace mine MEMORY.md --wing <project>
+```
+
+Avoid `mempalace mine .` (whole-repo mine) — it pulls in result cards,
+READMEs, and test-prompts that drown real memory.
+
 ## Operations
 
 ### `state show` — read current state
@@ -269,6 +289,7 @@ file to archive) — confirm before running.
 | Wire `mempalace-mcp` as moss-mem's primary read/write path | Use `mempalace <subcmd>` CLI directly; MCP wiring is optional and adds a runtime dependency for no functional gain |
 | Call `mempalace_diary_write` / `mempalace_kg_add` / `mempalace_create_tunnel` as if they were CLI subcommands | These are MCP tool names only; the CLI surface is `mempalace mine` / `sync` / `search` / `init` / `wake-up` — no `diary` / `kg` / `tunnel` subcommands exist |
 | Call `state set key_decisions=…` before any `state commit` for the current task | The call prints ✅ but the handoff fields land in scratchpad, not the task file. Run `state commit -m "…"` first, then `state set key_decisions=…`. See P9 trap in Quick Dispatch |
+| `mempalace mine .` (whole-repo mine) | Use scoped mine: `mempalace mine .moss-mem/tasks/ .moss-mem/summaries/ MEMORY.md --wing <project>`. Whole-repo mine pulls in result cards, READMEs, test fixtures that drown real memory in small palaces |
 
 ## If-Then Fallbacks
 
@@ -283,6 +304,7 @@ mode rather than blocking.
 | MCP tool missing or timeout | Use the `mempalace` CLI directly; MCP is not the primary path | File-only: `grep -r "…" .moss-mem/`; record `[SYNC-PENDING]` in the task note; `mempalace mine` later |
 | `mempalace` CLI unavailable | Continue file-only after the Python command succeeds | Add note `[SYNC-PENDING] install/run mempalace`; mine `.moss-mem/` at handoff |
 | Search returns empty | Widen query or `max_distance`; try CLI `mempalace search` | File search over `MEMORY.md` and `.moss-mem/`; re-mine relevant memory files |
+| `mempalace search` returns low confidence (top cosine < 0.5 AND < 3 hits) | Switch to `grep -r "…" MEMORY.md .moss-mem/` and label mempalace output as `low-confidence` | Re-mine with `mempalace mine .moss-mem/tasks/ .moss-mem/summaries/ MEMORY.md --wing <project>` (scoped, not whole-repo) |
 | `memory-index.md` stale | `knowledge-index` then `knowledge-check` | Search `MEMORY.md` and `.moss-mem/` directly; mark `[INDEX-STALE]` in the active task |
 | Handoff fields incomplete | `state validate --fix` | Fill `last_action`/`key_decisions`/`landmines` via `state set`, then `state validate` |
 | `mempalace_sync` preview shows stale drawers | 🛑 STOP and show the preview | Skip `apply=true`; verify with `mempalace_get_drawer` or file search before pruning later |
