@@ -38,6 +38,12 @@ this session needs it, leave it in `.harness/`.
 
 ## Quick Dispatch
 
+> **Placeholders** — `{base}` = the moss-mem installation directory
+> (`~/.claude/skills/moss-mem` in Claude Code, or wherever the skill was
+> installed). `<project>` = the `mempalace init` wing name (typically your
+> repo's directory name; e.g. `mempalace init . --wing morrow_skills`). All
+> commands below assume `{base}` is expanded.
+
 | Intent | Command | Notes |
 |---|---|---|
 | Where am I? | `python3 {base}/scripts/memory_manager.py state show` | 1 step; reads MEMORY.md + active task file |
@@ -50,6 +56,17 @@ this session needs it, leave it in `.harness/`.
 | Regenerate index | `python3 {base}/scripts/memory_manager.py knowledge-index` | Rebuild `.moss-mem/index-cache/memory-index.md` |
 | Check layout | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate memory paths exist |
 | **Legacy aliases** | `start` / `update` / `complete` / `show` / `add-note` / `init` | All remain functional; internally map to `state *` |
+
+> ⚠️ **P9 trap — `state set key_decisions=…` on a non-existent task**:
+> If you call `state set` with `key_decisions` / `last_action` / `landmines`
+> **before any `state commit` for this task**, the call prints `✅ MEMORY.md
+> updated` but does **not** create the task file. Your decisions land in the
+> scratchpad, not in the task's handoff fields. Symptom: `state show` reads
+> an older (or missing) task file and your decision is invisible.
+> **Fix**: when a task needs handoff fields written, call `state commit -m
+> "…"` first (creates the task file), then `state set key_decisions=…
+> last_action=… landmines=…`. For routine progress updates with no handoff
+> fields, plain `state set` is fine.
 
 ## Architecture
 
@@ -202,6 +219,12 @@ hand-edit the generated index.
 
 ## Handoff Protocol
 
+> ⚠️ Before following this protocol, ensure a task file exists (see the
+> P9 trap note in Quick Dispatch above). If you only ever called `state set`
+> without ever calling `state commit` for this task, the handoff fields will
+> silently land in scratchpad, not in the task file. Run `state commit -m
+> "…"` first if needed.
+
 For session-end or task-completion handoffs, follow this 4-step flow. Each step
 has a gate; never skip a gate.
 
@@ -245,6 +268,7 @@ file to archive) — confirm before running.
 | Read or write `.harness/sessions/<id>/` | That is harness territory, not moss-mem's |
 | Wire `mempalace-mcp` as moss-mem's primary read/write path | Use `mempalace <subcmd>` CLI directly; MCP wiring is optional and adds a runtime dependency for no functional gain |
 | Call `mempalace_diary_write` / `mempalace_kg_add` / `mempalace_create_tunnel` as if they were CLI subcommands | These are MCP tool names only; the CLI surface is `mempalace mine` / `sync` / `search` / `init` / `wake-up` — no `diary` / `kg` / `tunnel` subcommands exist |
+| Call `state set key_decisions=…` before any `state commit` for the current task | The call prints ✅ but the handoff fields land in scratchpad, not the task file. Run `state commit -m "…"` first, then `state set key_decisions=…`. See P9 trap in Quick Dispatch |
 
 ## If-Then Fallbacks
 
