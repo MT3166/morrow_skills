@@ -43,7 +43,7 @@ this session needs it, leave it in `.harness/`.
 | Where am I? | `python3 {base}/scripts/memory_manager.py state show` | 1 step; reads MEMORY.md + active task file |
 | Set state | `python3 {base}/scripts/memory_manager.py state set current_task="…" next_step="…"` | Declarative, idempotent, 0 round-trips; missing keys use placeholders |
 | Commit snapshot | `python3 {base}/scripts/memory_manager.py state commit -m "auth: 60% done"` | Writes task file + updates MEMORY.md pointer |
-| Search memory | `mempalace_search query="…"` (MCP) → `mempalace search "…"` (CLI) → `grep -r "…" .moss-mem/` (file) | Degrade through 3 tiers |
+| Search memory | `mempalace search "…" --wing <project>` (CLI) → `grep -r "…" .moss-mem/` (file) | Degrade through 2 tiers |
 | Add note | `python3 {base}/scripts/memory_manager.py state note "found race in token refresh"` | Timestamped scratchpad |
 | Validate handoff | `python3 {base}/scripts/memory_manager.py state validate [--fix]` | Check handoff fields; `--fix` auto-fills from git |
 | Init | `python3 {base}/scripts/memory_manager.py state init` | Create `.moss-mem/` + MEMORY.md |
@@ -86,19 +86,22 @@ called `state set`".
 
 ### Search & retrieval
 
-Three tiers, in priority order. The first that works wins; the agent does not
-need to try later tiers unless the first returns nothing.
+Two tiers, in priority order. The first that works wins; the agent does not
+need to try the other tier unless the first returns nothing.
 
-1. **MCP** — `mempalace_search query="…" wing=<project> [limit=10] [max_distance=1.5]`
-   - Semantic (ChromaDB) plus optional wing/room filters
-2. **CLI** — `mempalace search "…" --wing <project> [--room=…] [--results=10]`
-   - Hybrid cosine + BM25
-3. **File** — `grep -r "…" MEMORY.md .moss-mem/`
+1. **CLI** — `mempalace search "…" --wing <project> [--room=…] [--results=10]`
+   - Hybrid cosine + BM25 (ChromaDB-backed)
+2. **File** — `grep -r "…" MEMORY.md .moss-mem/`
    - Exact match only
 
-For semantic tools, KG, diary, and the full 30-tool MemPalace surface, see
+For the full `mempalace` CLI surface (search/mine/sync/init/wake-up/...), see
 [`references/mempalace-tools.md`](references/mempalace-tools.md). Live source
 of truth: `mempalace instructions help`.
+
+> **MCP status**: `mempalace-mcp` exists as a stdio launcher inside the
+> `mempalace` package, but moss-mem does **not** depend on it. Reach for the
+> CLI directly. The reference file lists MCP tool names for users who wire
+> `mempalace-mcp` into their runtime; moss-mem does not require that wiring.
 
 ## Operations
 
@@ -240,6 +243,8 @@ file to archive) — confirm before running.
 | Skip handoff gates because a task looks small | Run `state validate`/`state validate --fix` before commit |
 | Let MCP/CLI failures block writes | Degrade to file-only, finish the state change, mine/sync later |
 | Read or write `.harness/sessions/<id>/` | That is harness territory, not moss-mem's |
+| Wire `mempalace-mcp` as moss-mem's primary read/write path | Use `mempalace <subcmd>` CLI directly; MCP wiring is optional and adds a runtime dependency for no functional gain |
+| Call `mempalace_diary_write` / `mempalace_kg_add` / `mempalace_create_tunnel` as if they were CLI subcommands | These are MCP tool names only; the CLI surface is `mempalace mine` / `sync` / `search` / `init` / `wake-up` — no `diary` / `kg` / `tunnel` subcommands exist |
 
 ## If-Then Fallbacks
 
@@ -251,7 +256,7 @@ mode rather than blocking.
 |---|---|---|
 | `MEMORY.md` missing | `python3 {base}/scripts/memory_manager.py state init` | Create the task with `state commit -m "…"`, then add the current pointer to `MEMORY.md` manually |
 | Stale `.edit_lock` after crash | `python3 {base}/scripts/memory_manager.py recover` | Remove `.moss-mem/tasks/.edit_lock` (Unix `rm`, Windows `del`), then `state validate --fix` |
-| MCP tool missing or timeout | Switch to CLI: `mempalace search "…"` | File-only: `grep -r "…" .moss-mem/`; record `[SYNC-PENDING]` in the task note; `mempalace mine` later |
+| MCP tool missing or timeout | Use the `mempalace` CLI directly; MCP is not the primary path | File-only: `grep -r "…" .moss-mem/`; record `[SYNC-PENDING]` in the task note; `mempalace mine` later |
 | `mempalace` CLI unavailable | Continue file-only after the Python command succeeds | Add note `[SYNC-PENDING] install/run mempalace`; mine `.moss-mem/` at handoff |
 | Search returns empty | Widen query or `max_distance`; try CLI `mempalace search` | File search over `MEMORY.md` and `.moss-mem/`; re-mine relevant memory files |
 | `memory-index.md` stale | `knowledge-index` then `knowledge-check` | Search `MEMORY.md` and `.moss-mem/` directly; mark `[INDEX-STALE]` in the active task |
@@ -301,15 +306,16 @@ If yes, write to `.moss-mem/`. If only this session, leave it in `.harness/`.
 # 1. Initialize memory
 python3 {base}/scripts/memory_manager.py state init
 
-# 2. Install MemPalace (optional — for semantic search)
+# 2. Install MemPalace CLI (optional — for semantic search)
 pip install mempalace
 mempalace init <project_dir> --yes
 mempalace mine .moss-mem/ --wing <project_name>
 
-# 3. Register MCP server with your coding runtime (when MCP available)
+# 3. (Optional) Wire mempalace-mcp into your coding runtime
 #    Claude Code:  claude mcp add mempalace -- mempalace-mcp
 #    Codex:        codex mcp add mempalace
 #    Cursor et al: add to MCP configuration
+#    Note: moss-mem does not require this. The CLI is the primary path.
 
 # 4. Initial validation
 python3 {base}/scripts/memory_manager.py knowledge-check
@@ -335,5 +341,5 @@ platforms; use backslashes only in native shell commands.
 
 - **init skill**: after creating project structure, run `moss-mem state init` then `moss-mem knowledge-init`.
 - **Any long task**: `state set current_task=… next_step=…` → work → `state validate` → `state commit`.
-- **Cross-session recovery**: `moss-mem state show` (1 step) is enough for "where am I?". For "show me everything", escalate to `mempalace wake-up --wing <project>` or 6-step context recovery via MemPalace MCP.
-- **Setup**: `pip install mempalace && mempalace init <dir> --yes && mempalace mine .moss-mem/ --wing <project>`; register `mempalace-mcp` when MCP available.
+- **Cross-session recovery**: `moss-mem state show` (1 step) is enough for "where am I?". For "show me everything", escalate to `mempalace wake-up --wing <project>` (CLI).
+- **Setup**: `pip install mempalace && mempalace init <dir> --yes && mempalace mine .moss-mem/ --wing <project>`. The `mempalace-mcp` binary is a stdio launcher inside the same package; wire it only if your runtime requires MCP, not for moss-mem itself.
