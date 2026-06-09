@@ -32,26 +32,26 @@
   {
     "id": 6,
     "prompt": "搜索一下之前做过的认证相关的任务",
-    "expected": "检查 MCP 可用性 → mempalace_search query='认证' wing=<project> → 按分数表格输出，含 drawer ID；MCP不可用时 fallback 到 grep 关键词搜索，标注 'keyword match only'",
-    "type": "mcp_search"
+    "expected": "用 `mempalace search \"认证\" --wing <project>` 走语义搜索；CLI 不可用时 fallback `grep -r \"认证\" MEMORY.md .moss-mem/`，标注 'keyword match only'",
+    "type": "cli_search"
   },
   {
     "id": 7,
     "prompt": "写一条会话日记：今天完成了 JWT 认证中间件的重构，关键决策是将 token 存在 httpOnly cookie 而非 localStorage",
-    "expected": "草拟 AAAK 格式条目 → 展示给用户确认 → mempalace_diary_write 或 fallback add-note [DIARY]；AAAK: SESSION:YYYY-MM-DD|auth.middleware|refactored.JWT|KEY.dec:cookies.over.localStorage|★★★",
-    "type": "mcp_diary"
+    "expected": "用 `state note \"...\"` 把 AAAK 条目写到当前 task scratchpad；AAAK: SESSION:YYYY-MM-DD|auth.middleware|refactored.JWT|KEY.dec:cookies.over.localStorage|★★★。注：MCP-only 的 mempalace_diary_write 不可达，统一走文件 scratchpad",
+    "type": "cli_diary"
   },
   {
     "id": 8,
     "prompt": "我离开了一段时间，帮我恢复上下文，看看之前在做什么",
-    "expected": "执行6步恢复：show → diary_read → search → kg_query → traverse → synthesize → 按模板输出 Context Recovery 摘要，含 Current Task / Recent Activity / Key Decisions / Landmines / Related Work / Sources / Recommended Next Action",
-    "type": "mcp_context"
+    "expected": "执行2步恢复：state show → mempalace wake-up --wing <project>（CLI），合成 Context Recovery 摘要含 Current Task / Recent Activity / Key Decisions / Landmines / Recommended Next Action",
+    "type": "cli_context"
   },
   {
     "id": 9,
     "prompt": "把 API 限流这个任务和之前 API 安全加固的任务关联起来",
-    "expected": "先确认关系 → mempalace_kg_add + mempalace_create_tunnel；fallback 写 Key Decisions；输出 🔗 Link Created 或 🔗 Link Noted (file-only) 格式",
-    "type": "mcp_link"
+    "expected": "用 `state set key_decisions=\"...\"` 在当前 task 写明关联关系；CLI 无 KG/tunnel 子命令，关联关系落到文件层；输出 🔗 Link Noted (file-only) 格式",
+    "type": "cli_link"
   },
   {
     "id": 10,
@@ -86,7 +86,7 @@
   {
     "id": 14,
     "prompt": "我想找之前做过的某个功能相关的工作，但记不清具体关键词了，怎么办？",
-    "expected": "引导用户走 MemPalace semantic search（mempalace_search query='大致描述' wing=<project>），利用语义向量搜索即使关键词不精确也能找到相关内容。若 MCP 不可用则用 CLI hybrid search。不直接让人去 grep。",
+    "expected": "引导用户走 MemPalace CLI semantic search（`mempalace search \"大致描述\" --wing <project>`），用语义向量 + BM25 hybrid 找；fallback 走 grep。CLI 不可达时直接 grep MEMORY.md + .moss-mem/",
     "type": "fuzzy_search_guidance"
   }
 ]

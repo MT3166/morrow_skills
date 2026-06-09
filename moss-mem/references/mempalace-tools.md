@@ -1,5 +1,14 @@
 # MemPalace Tool Reference
 
+> ⚠️ **Status for moss-mem users**: This file lists the **MCP tool names** that
+> `mempalace-mcp` exposes. moss-mem's primary read/write path is the **CLI**
+> (`mempalace <subcmd>`). MCP is optional wiring, not a requirement. If your
+> runtime has not registered `mempalace-mcp`, ignore this file and use
+> `mempalace --help` / `mempalace instructions <topic>` directly. Several MCP
+> tools below (e.g. `mempalace_diary_write`, `mempalace_kg_add`,
+> `mempalace_create_tunnel`) have **no CLI equivalent** — they are only
+> reachable through the MCP server.
+
 > External reference — moved from SKILL.md (was 80+ lines) to keep the main skill
 > focused on workflow, not MemPalace API surface. **Authoritative live source**:
 > `mempalace instructions help` and `mempalace --help`. This file is a snapshot
