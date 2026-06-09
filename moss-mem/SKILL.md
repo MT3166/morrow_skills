@@ -8,7 +8,7 @@ description: >-
   declarative `state set/show/commit` API; legacy `start`/`update`/`complete`
   remain as aliases. Triggers: start task, update task, complete task, handoff,
   where am I, show memory, search memory, add note, knowledge init/index/check.
-version: "4.0.0"
+version: "4.1.0"
 ---
 
 # moss-mem — Project memory across sessions
