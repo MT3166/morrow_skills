@@ -15,6 +15,62 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+# --- Windows console encoding shim ---
+# Windows cmd defaults to GBK (cp936); printing emoji then crashes with
+# `UnicodeEncodeError`. Modern terminals (Windows Terminal / PowerShell 7 /
+# VS Code / macOS / Linux) are UTF-8 by default and need no intervention.
+# Strategy: try to reconfigure stdout/stderr to UTF-8. If unavailable
+# (Python < 3.7), the try/except is a no-op and safe_print() below falls
+# back to an ASCII marker table so the script still runs.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        pass  # Python < 3.7 or stream already detached (e.g. piped without text mode)
+
+# Emoji → ASCII fallback table, used only when the console codec can't
+# encode the original character. Keep this table small and obvious; every
+# entry here corresponds to a character used by a print() in this file.
+_ASCII_FALLBACK = {
+    "✅": "[OK]",
+    "❌": "[ERR]",
+    "⚠️": "[WARN]",
+    "ℹ️": "[INFO]",
+    "🔧": "[WIP]",
+    "🔎": "[SEARCH]",
+    "📝": "[NOTE]",
+    "📊": "[STAT]",
+    "📋": "[LIST]",
+    "📦": "[ARCHIVE]",
+}
+
+
+def safe_print(*args, **kwargs):
+    """print() wrapper that degrades emoji to ASCII when stdout can't encode them.
+
+    On modern terminals (UTF-8) this is a no-op wrapper. On Windows cmd
+    (GBK) it replaces emoji with their ASCII fallback before printing, so
+    the script keeps running instead of crashing mid-command.
+    """
+    text = kwargs.pop("end", "\n")
+    if kwargs:
+        # Unknown kwargs (file=, flush=) — fall back to print directly;
+        # if it raises, the user has a deeper problem than emoji.
+        print(*args, **kwargs)
+        return
+    msg = " ".join(str(a) for a in args)
+    try:
+        print(msg, end=text)
+    except UnicodeEncodeError:
+        # Replace each known emoji, then strip any remaining non-encodable
+        # chars so the call site doesn't have to know about codec details.
+        for emoji, marker in _ASCII_FALLBACK.items():
+            msg = msg.replace(emoji, marker)
+        # Last-resort scrub for emoji we didn't pre-list (e.g. pasted by
+        # future contributors). 'replace' matches errors="replace" above.
+        print(msg.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8", errors="replace"), end=text)
+
+
 MEMORY_FILE = "MEMORY.md"
 MOSS_DIR = ".moss-mem"
 TASKS_DIR = ".moss-mem/tasks"
@@ -220,7 +276,7 @@ def _create_default_memory():
 """
     with open(MEMORY_FILE, "w") as f:
         f.write(content)
-    print(f"✅ Created default {MEMORY_FILE}")
+    safe_print(f"✅ Created default {MEMORY_FILE}")
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +315,8 @@ def cmd_start(description: str, next_step: str):
             "last_action": f"Started: {description}",
         })
 
-        print(f"✅ Task started: {task_file}")
-        print(f"📝 Pointer updated in MEMORY.md")
+        safe_print(f"✅ Task started: {task_file}")
+        safe_print(f"📝 Pointer updated in MEMORY.md")
 
     finally:
         release_lock()
@@ -290,9 +346,9 @@ def cmd_update(description: str, next_step: str, status: str,
             if task_file and Path(task_file).exists():
                 _update_task_file(task_file, last_action, key_decisions, landmines)
 
-        print(f"✅ MEMORY.md updated")
-        print(f"📊 Status: {status}")
-        print(f"📋 Next: {next_step}")
+        safe_print(f"✅ MEMORY.md updated")
+        safe_print(f"📊 Status: {status}")
+        safe_print(f"📋 Next: {next_step}")
 
     finally:
         release_lock()
@@ -325,7 +381,7 @@ def cmd_complete(description: str):
             "last_action": f"Completed: {description}",
         })
 
-        print(f"✅ Task completed and archived")
+        safe_print(f"✅ Task completed and archived")
 
     finally:
         release_lock()
@@ -338,7 +394,7 @@ def cmd_add_note(note: str):
         sys.exit(1)
     try:
         _memory_update({"scratchpad_notes": [note]})
-        print(f"✅ Note added to scratchpad")
+        safe_print(f"✅ Note added to scratchpad")
     finally:
         release_lock()
 
@@ -374,7 +430,7 @@ def cmd_recover():
     # Check lock file first
     lock_file = Path(TASKS_DIR) / ".edit_lock"
     if lock_file.exists():
-        print(f"⚠️  Lock file exists: {lock_file}")
+        safe_print(f"⚠️  Lock file exists: {lock_file}")
         print("   If the previous process was killed, delete it with:")
         print(f"   rm {lock_file}")
         print()
@@ -393,11 +449,11 @@ def cmd_recover():
                 la_end = content.find("## ", la_start + 1)
                 la_section = content[la_start:la_end] if la_end > 0 else content[la_start:]
                 if "<!--" in la_section and "-->" in la_section:
-                    print("⚠️  ## Last Action is empty (pending). Fill it before continuing.")
+                    safe_print("⚠️  ## Last Action is empty (pending). Fill it before continuing.")
             else:
-                print("⚠️  Task file has no ## Last Action section.")
+                safe_print("⚠️  Task file has no ## Last Action section.")
         else:
-            print(f"⚠️  Task file not found: {task_file} (stale pointer)")
+            safe_print(f"⚠️  Task file not found: {task_file} (stale pointer)")
     else:
         print("No current task pointer found.")
 
@@ -438,7 +494,7 @@ def cmd_recover():
 
     print()
     print("After reviewing git state, run:")
-    print("  moss-mem update -d 'recovered context' -n '<next step>' -s '🔧'")
+    safe_print("  moss-mem update -d 'recovered context' -n '<next step>' -s '🔧'")
     print("to fill in the task file with recovery information.")
 
 
@@ -481,8 +537,8 @@ def cmd_knowledge_init(domain: str = None):
         gitkeep = directory / ".gitkeep"
         if not gitkeep.exists():
             gitkeep.write_text("")
-    print("✅ moss-mem memory layout ready: MEMORY.md + .moss-mem/{tasks,summaries,index-cache}/")
-    print("ℹ️  AGENTS.md and project docs are external; moss-mem reads them only when present.")
+    safe_print("✅ moss-mem memory layout ready: MEMORY.md + .moss-mem/{tasks,summaries,index-cache}/")
+    safe_print("ℹ️  AGENTS.md and project docs are external; moss-mem reads them only when present.")
 
 
 def cmd_knowledge_index():
@@ -511,7 +567,7 @@ def cmd_knowledge_index():
     else:
         lines.append("- <!-- none -->")
     index_path.write_text("\n".join(lines) + "\n")
-    print(f"✅ Memory index written: {index_path}")
+    safe_print(f"✅ Memory index written: {index_path}")
 
 
 def cmd_knowledge_check(strict: bool = False):
@@ -527,7 +583,7 @@ def cmd_knowledge_check(strict: bool = False):
 
     agents_path = Path("AGENTS.md")
     if agents_path.exists():
-        print("ℹ️  AGENTS.md found; moss-mem treats it as read-only external context")
+        safe_print("ℹ️  AGENTS.md found; moss-mem treats it as read-only external context")
 
     index_path = Path(INDEX_CACHE_DIR) / "memory-index.md"
     sources = []
@@ -540,21 +596,21 @@ def cmd_knowledge_check(strict: bool = False):
         if newer:
             warnings.append(f"memory index is stale; newer source: {max(newer, key=lambda p: p.stat().st_mtime_ns)}")
         else:
-            print("✅ memory index is fresh")
+            safe_print("✅ memory index is fresh")
 
     if warnings:
-        print("\n⚠️  Warnings:")
+        safe_print("\n⚠️  Warnings:")
         for warning in warnings:
-            print(f"   • {warning}")
+            safe_print(f"   • {warning}")
     if errors:
-        print("\n❌ Memory layout check failed:")
+        safe_print("\n❌ Memory layout check failed:")
         for error in errors:
-            print(f"   • {error}")
+            safe_print(f"   • {error}")
         print("\nRun: moss-mem init")
         sys.exit(1)
     if strict and warnings:
         sys.exit(1)
-    print("✅ moss-mem memory layout ok")
+    safe_print("✅ moss-mem memory layout ok")
 
 
 def _slugify_topic(topic: str) -> str:
@@ -622,8 +678,8 @@ def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decis
         "",
     ])
     summary_path.write_text(content)
-    print(f"✅ Harness summary captured: {summary_path}")
-    print("🔎 Next: mine `.moss-mem/summaries/` into MemPalace before handoff if MCP/CLI is available.")
+    safe_print(f"✅ Harness summary captured: {summary_path}")
+    safe_print("🔎 Next: mine `.moss-mem/summaries/` into MemPalace before handoff if MCP/CLI is available.")
 
 def _git_diff_summary():
     """Get summary of uncommitted changes."""
@@ -736,17 +792,17 @@ def cmd_check(task_file: str = None, fix: bool = False):
     if fix_applied:
         with open(task_file, "w") as f:
             f.write(content)
-        print("✅ Auto-fix applied:")
+        safe_print("✅ Auto-fix applied:")
         for f_msg in fix_applied:
             print(f"   - {f_msg}")
 
     if issues:
-        print("⚠️  Task file incomplete:")
+        safe_print("⚠️  Task file incomplete:")
         for issue in issues:
             print(f"   - {issue}")
         sys.exit(1)
     else:
-        print("✅ Task file is complete.")
+        safe_print("✅ Task file is complete.")
         sys.exit(0)
 
 
@@ -853,7 +909,7 @@ def _archive_task(task_file: str):
             task_path.unlink()
         except FileNotFoundError:
             print(f"[WARNING] Task file already removed: {task_path}")
-        print(f"📦 Task archived: {archive_file}")
+        safe_print(f"📦 Task archived: {archive_file}")
 
 
 def _append_to_archive(description: str):
@@ -894,11 +950,11 @@ def _migrate_old_tasks_dir():
         return
 
     if new_path.exists():
-        print(f"⚠️  Both {OLD_TASKS_DIR}/ and {TASKS_DIR}/ exist — manual merge required.")
+        safe_print(f"⚠️  Both {OLD_TASKS_DIR}/ and {TASKS_DIR}/ exist — manual merge required.")
         print(f"   Remove {OLD_TASKS_DIR}/ if {TASKS_DIR}/ is up to date.")
         return
 
-    print(f"⚠️  Legacy {OLD_TASKS_DIR}/ exists outside moss-mem ownership.")
+    safe_print(f"⚠️  Legacy {OLD_TASKS_DIR}/ exists outside moss-mem ownership.")
     print(f"   moss-mem will not move or delete it automatically.")
     print(f"   To migrate manually: mkdir -p {TASKS_DIR} && cp -R {OLD_TASKS_DIR}/. {TASKS_DIR}/")
 
@@ -919,12 +975,12 @@ def cmd_init():
     if not archive_path.exists():
         with open(archive_path, "w") as f:
             f.write(f"# MEMORY Archive\n\n## Completed Tasks\n")
-        print(f"✅ {archive_path} created")
+        safe_print(f"✅ {archive_path} created")
     if Path(MEMORY_FILE).exists():
-        print(f"⚠️  {MEMORY_FILE} already exists")
+        safe_print(f"⚠️  {MEMORY_FILE} already exists")
     else:
         _create_default_memory()
-    print(f"✅ {TASKS_DIR}/ directory ready")
+    safe_print(f"✅ {TASKS_DIR}/ directory ready")
 
 
 # ---------------------------------------------------------------------------

@@ -383,6 +383,16 @@ mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <proj
 `memory_manager.py` uses Python stdlib only. Forward slashes work on all
 platforms; use backslashes only in native shell commands.
 
+**Console encoding**: the script tries to reconfigure stdout/stderr to
+UTF-8 at startup (`sys.stdout.reconfigure(encoding="utf-8", errors="replace")`),
+which works on macOS, Linux, Windows Terminal, PowerShell 7, and VS Code's
+integrated terminal. If reconfigure is unavailable (Python < 3.7) and the
+console codec can't encode emoji (Windows legacy `cmd`), the script falls
+back to ASCII markers (`[OK]` `[WARN]` `[ERR]` `[INFO]` `[WIP]` `[SEARCH]`
+`[NOTE]` `[STAT]` `[LIST]` `[ARCHIVE]`) so it never crashes on encoding.
+For best fidelity on Windows, prefer Windows Terminal, PowerShell 7, or
+VS Code over legacy `cmd`.
+
 ## Skill Integration
 
 - **init skill**: after creating project structure, run `moss-mem state init` then `moss-mem knowledge-init`.
