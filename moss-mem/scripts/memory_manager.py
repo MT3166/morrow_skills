@@ -962,7 +962,7 @@ def _migrate_old_tasks_dir():
 
 
 def cmd_init():
-    """Initialize MEMORY.md and .moss-mem/tasks/ directory."""
+    """Initialize MEMORY.md and .moss-mem/{tasks,summaries,index-cache}/ directories."""
     # Ensure .moss-mem/ parent exists
     Path(MOSS_DIR).mkdir(exist_ok=True)
 
@@ -970,6 +970,12 @@ def cmd_init():
     _migrate_old_tasks_dir()
 
     ensure_tasks_dir()
+    # Also create summaries/ and index-cache/ up front so `state init` matches
+    # the SKILL.md contract (line 216-217). Previously these were lazy-created
+    # on first use, which made `knowledge-check` fail right after `state init`
+    # on a fresh project — confusing for new users.
+    Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
+    Path(INDEX_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
     archive_path = Path(TASKS_DIR) / ARCHIVE_FILE
     if not archive_path.exists():
