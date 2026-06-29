@@ -1,0 +1,2 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-06-29T15:35	auto-optimize/20260629-1530	moss-mem	-	73.8	baseline	-	初始评估：compaction 完全缺失 + 1 处 runtime drift	full_test
