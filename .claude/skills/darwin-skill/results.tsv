@@ -1,0 +1,4 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-06-29T15:35	ca83339	moss-mem	-	73.8	baseline	-	初始评估：compaction 完全缺失 + 1 处 runtime drift	full_test
+2026-06-29T15:50	51b447b	moss-mem	73.8	74.9	keep	runtime neutrality	"in Claude Code" → "on Claude Code ... equivalent"（P0 gate）	full_test
+2026-06-29T14:43	25d39a4+c0eea31	moss-mem	74.9	85.4	keep	compaction 功能补齐	cmd_compact 落地 + 4 条 if-then + 3 条 anti-patterns + 3 步验证；HL-2/3 全命中；manual 验证 15→10 archived	full_test
