@@ -39,10 +39,11 @@ this session needs it, leave it in `.harness/`.
 ## Quick Dispatch
 
 > **Placeholders** — `{base}` = the moss-mem installation directory
-> (`~/.claude/skills/moss-mem` in Claude Code, or wherever the skill was
-> installed). `<project>` = the `mempalace init` wing name (typically your
-> repo's directory name; e.g. `mempalace init . --wing morrow_skills`). All
-> commands below assume `{base}` is expanded.
+> (the runtime-specific skills path: `~/.claude/skills/moss-mem` on Claude Code,
+> or the equivalent skills directory on Codex/Cursor/OpenClaw/Hermes — wherever
+> the skill was installed). `<project>` = the `mempalace init` wing name
+> (typically your repo's directory name; e.g. `mempalace init . --wing
+> morrow_skills`). All commands below assume `{base}` is expanded.
 
 | Intent | Command | Notes |
 |---|---|---|
