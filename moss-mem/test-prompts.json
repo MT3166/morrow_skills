@@ -88,5 +88,26 @@
     "prompt": "我想找之前做过的某个功能相关的工作，但记不清具体关键词了，怎么办？",
     "expected": "引导用户走 MemPalace CLI semantic search（`mempalace search \"大致描述\" --wing <project>`），用语义向量 + BM25 hybrid 找；fallback 走 grep。CLI 不可达时直接 grep MEMORY.md + .moss-mem/",
     "type": "fuzzy_search_guidance"
+  },
+  {
+    "id": 15,
+    "prompt": "我已经在这项目上做了 60 多个 task 了，.moss-mem/tasks/ 目录里塞满了 md 文件，搜东西越来越慢。帮我压缩一下记忆，把老的 task 归档",
+    "expected": "调用 python3 {base}/scripts/memory_manager.py state compact --strategy archive-summary（或 /moss-mem compact）；扫描 .moss-mem/tasks/，把老 task 移到 .moss-mem/archive/YYYY/，每个 task 保留首段摘要+key_decisions+landmines，更新 MEMORY.md 的归档索引。打印压缩前/后 task 数量、节省 token、保留率",
+    "type": "compaction_manual",
+    "eval_focus": "新增功能——检查 moss-mem 是否真的实现了 compaction 命令"
+  },
+  {
+    "id": 16,
+    "prompt": "刚完成一个 task，发现 .moss-mem/tasks/ 已经积累了 50+ 文件，该不该自动触发压缩？",
+    "expected": "在 state commit / complete 后检测 task 数量，超过阈值（默认 30，可配置 --threshold N）时 🛑 STOP 提示用户：检测到 N 个历史 task（远超阈值 T），是否执行 compaction？展示建议保留最近 K 个 + 压缩比估算。让用户确认后才执行；不强制自动跑",
+    "type": "compaction_auto_trigger",
+    "eval_focus": "检查 moss-mem 是否实现了阈值自动检测 + 用户确认的检查点"
+  },
+  {
+    "id": 17,
+    "prompt": "压缩了记忆后，怎么验证我没丢重要信息？给我一个 3 步验证清单",
+    "expected": "输出结构化清单：1) state knowledge-check --strict 确认归档目录结构；2) mempalace search 抽查 3 个历史 task 关键词能搜到（或 grep -r 兜底）；3) state show 当前 task 仍然完整 + 随机 cat 一个 archive 摘要确认 key_decisions 还在。每步有具体命令。出现 🔴 CHECKPOINT 标记关键决策点",
+    "type": "compaction_verification",
+    "eval_focus": "检查是否有结构化的 post-compact 验证流程 + 失败模式 fallback"
   }
 ]
