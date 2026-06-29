@@ -56,7 +56,8 @@ this session needs it, leave it in `.harness/`.
 | Init | `python3 {base}/scripts/memory_manager.py state init` | Create `.moss-mem/` + MEMORY.md |
 | Regenerate index | `python3 {base}/scripts/memory_manager.py knowledge-index` | Rebuild `.moss-mem/index-cache/memory-index.md` |
 | Check layout | `python3 {base}/scripts/memory_manager.py knowledge-check [--strict]` | Validate memory paths exist |
-| **Legacy aliases** | `start` / `update` / `complete` / `show` / `add-note` / `init` | All remain functional; internally map to `state *` |
+| **Compact memory** | `python3 {base}/scripts/memory_manager.py state compact [--dry-run] [--keep-recent N] [--strategy archive-summary\|archive-full] [--yes]` | Archive old task files to `.moss-mem/tasks/archive/YYYY/`. 🛑 STOP prompts before moving. Threshold (default 30) auto-nudges on commit/complete — compaction is never silent |
+| **Legacy aliases** | `start` / `update` / `complete` / `show` / `add-note` / `init` / `compact` | All remain functional; internally map to `state *` |
 
 > ⚠️ **P9 trap — `state set key_decisions=…` on a non-existent task**:
 > If you call `state set` with `key_decisions` / `last_action` / `landmines`
@@ -238,6 +239,57 @@ python3 {base}/scripts/memory_manager.py knowledge-check     # validate memory p
 `knowledge-index` is the only writer of `.moss-mem/index-cache/`. Never
 hand-edit the generated index.
 
+### `state compact` — archive old task files
+
+```
+python3 {base}/scripts/memory_manager.py state compact [--strategy archive-summary|archive-full] [--keep-recent N] [--threshold T] [--dry-run] [--yes]
+```
+
+Moves task files older than the most recent `--keep-recent` (default 10) from
+`.moss-mem/tasks/` to `.moss-mem/tasks/archive/YYYY/<ts>_<name>.md`. Two
+strategies:
+
+| Strategy | What gets kept per archived task | When to use |
+|---|---|---|
+| `archive-summary` *(default)* | `Description` / `Next Step` / `Key Decisions` / `Landmines` only — drops scratchpad noise and superseded `Last Action` lines | Long-running projects where you want handoff-grade memory without bloat. Compression ratio ~3-5× |
+| `archive-full` | Full original body verbatim | Forensic / compliance use cases where zero information loss is required |
+
+**Trigger semantics**:
+- `state commit` and `state complete` print a 🛑 STOP nudge when
+  `.moss-mem/tasks/` exceeds `--threshold` (default 30) task files. The
+  nudge never blocks the calling command — compaction is always an
+  explicit, user-confirmed action.
+- `state compact` itself shows a 🛑 STOP prompt by default; pass `--yes`
+  to skip the prompt in non-interactive runs.
+
+**Three-step verification after compact** (use this whenever a compact
+moved > 5 tasks):
+
+```
+# 1) Validate directory layout — strict mode checks archive/2026/ exists and recent files remain
+python3 {base}/scripts/memory_manager.py knowledge-check --strict
+
+# 2) Spot-check 3 historical task keywords via mempalace; fall back to grep on low confidence
+mempalace search "<keyword from archived task>" --wing <project>
+grep -r "<keyword>" .moss-mem/tasks/archive/ .moss-mem/tasks/
+
+# 3) Confirm the active task pointer is intact and an archived summary keeps key_decisions
+python3 {base}/scripts/memory_manager.py state show
+head -40 .moss-mem/tasks/archive/$(date +%Y)/*.md
+```
+
+🔴 **CHECKPOINT** — step 2 (mempalace confidence check) is the gate that
+catches accidental data loss. If `mempalace search` returns 0 results for
+a keyword that previously ranked top-3, the archive summary dropped a
+section by mistake. 🛑 STOP and re-run with `--strategy archive-full`
+to restore the full body.
+
+**Re-indexing after compact** (MemPalace does not auto-detect new files):
+
+```
+mempalace mine .moss-mem/tasks/archive/ --wing <project>
+```
+
 ## Handoff Protocol
 
 > ⚠️ Before following this protocol, ensure a task file exists (see the
@@ -291,6 +343,9 @@ file to archive) — confirm before running.
 | Call `mempalace_diary_write` / `mempalace_kg_add` / `mempalace_create_tunnel` as if they were CLI subcommands | These are MCP tool names only; the CLI surface is `mempalace mine` / `sync` / `search` / `init` / `wake-up` — no `diary` / `kg` / `tunnel` subcommands exist |
 | Call `state set key_decisions=…` before any `state commit` for the current task | The call prints ✅ but the handoff fields land in scratchpad, not the task file. Run `state commit -m "…"` first, then `state set key_decisions=…`. See P9 trap in Quick Dispatch |
 | `mempalace mine .` (whole-repo mine) | Use scoped mine: `mempalace mine .moss-mem/tasks/ .moss-mem/summaries/ MEMORY.md --wing <project>`. Whole-repo mine pulls in result cards, READMEs, test fixtures that drown real memory in small palaces |
+| Run `state compact` silently from a hook / cron / agent loop without `--yes` or a visible log | The 🛑 STOP prompt exists for a reason — silent compaction drops data without an audit trail. Always pass `--yes` explicitly and log the command + result. If the prompt must be skipped, surface the compaction plan in a code comment or `state note` entry first |
+| Treat threshold nudge (after `commit`/`complete`) as a license to auto-compact | The threshold check only prints a 🛑 STOP nudge — it does NOT auto-execute. Compaction must remain an explicit, user-confirmed action via `state compact` so the user controls the retention policy |
+| Hand-write files under `.moss-mem/tasks/archive/YYYY/` | The archive/ subdirectory is owned by `state compact`; manual writes break the `2026-…_<name>.md` naming contract that grep/mempalace mine rely on. If you must restore an archived task, copy it back to `.moss-mem/tasks/` (not the archive subdir) |
 
 ## If-Then Fallbacks
 
@@ -310,6 +365,9 @@ mode rather than blocking.
 | Handoff fields incomplete | `state validate --fix` | Fill `last_action`/`key_decisions`/`landmines` via `state set`, then `state validate` |
 | `mempalace_sync` preview shows stale drawers | 🛑 STOP and show the preview | Skip `apply=true`; verify with `mempalace_get_drawer` or file search before pruning later |
 | `knowledge-check --strict` fails | Fix missing/stale memory paths or rerun `knowledge-init`/`knowledge-index` | Run non-strict `knowledge-check`; record layout issues as a task landmine; continue |
+| `state compact` archive write fails (disk full / permission denied) | Read the error — `cmd_compact` aborts further moves and leaves the source task file in place so a re-run is safe | 🛑 STOP — free disk / fix permissions, then re-run with the same args; the failed task was not moved, no manual cleanup needed |
+| Compact removed a section by mistake (`mempalace search` returns 0 for previously top-3 keyword) | Re-run `state compact --strategy archive-full` to restore full body (the script does not re-compact files already in `archive/`, so a fresh compact pass is required) | Re-mine the full archive: `mempalace mine .moss-mem/tasks/archive/ --wing <project>`; record the bug as a task landmine |
+| Compact prompt interrupts non-interactive run (CI / agent loop) | Re-run with `--yes` flag; verify exit code is 0 not 2 | If exit code 2, the abort was intentional — do not retry silently; show the user the compaction plan and ask before proceeding |
 
 ## State file formats
 
