@@ -382,9 +382,36 @@ def cmd_complete(description: str):
         })
 
         safe_print(f"✅ Task completed and archived")
+        # Post-complete: nudge user to compact if tasks/ has grown past threshold.
+        check_compact_threshold(threshold=30, source="complete")
 
     finally:
         release_lock()
+
+
+def check_compact_threshold(threshold: int = 30, source: str = "commit"):
+    """Print a 🛑 STOP nudge when .moss-mem/tasks/ exceeds `threshold` task files.
+
+    Never blocks the calling command — compaction must always be an explicit,
+    user-confirmed action via `state compact`. The nudge exists so the user
+    notices growth before it starts hurting grep/mempalace latency.
+    """
+    tasks_root = Path(TASKS_DIR)
+    if not tasks_root.exists():
+        return
+    count = 0
+    for p in tasks_root.glob("*.md"):
+        if p.name in _COMPACT_SKIP:
+            continue
+        count += 1
+    if count <= threshold:
+        return
+    safe_print("")
+    safe_print(f"🛑 STOP — .moss-mem/tasks/ has {count} task files (>{threshold} threshold).")
+    safe_print(f"   Search latency may degrade. Consider running:")
+    safe_print(f"     python3 {{base}}/scripts/memory_manager.py state compact --dry-run")
+    safe_print(f"   Re-run with `--keep-recent N` to tune how many tasks to retain.")
+    safe_print(f"   (Triggered after: {source}. Compaction is never automatic.)")
 
 
 def cmd_add_note(note: str):
@@ -891,6 +918,187 @@ def _update_task_file(task_file: str, last_action: str = None,
         raise RuntimeError(f"Write verification failed for {task_file}")
 
 
+# ---------------------------------------------------------------------------
+# Compaction — archive old tasks to keep .moss-mem/tasks/ lean
+# ---------------------------------------------------------------------------
+
+# Files in .moss-mem/tasks/ that are not task files and must never be compacted.
+_COMPACT_SKIP = {ARCHIVE_FILE, ".gitkeep", ".edit_lock"}
+
+
+def _extract_task_sections(content: str) -> dict:
+    """Parse a task file's H2 sections. Returns {section_name: body} for each `## Foo` block.
+
+    Used by compact to keep only the high-signal sections (Description, Key Decisions,
+    Landmines) and drop scratchpad noise. Tolerates missing sections (returns "").
+    """
+    sections = {}
+    current = None
+    buf: list[str] = []
+    for raw in content.splitlines():
+        line = raw.rstrip()
+        if line.startswith("## "):
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = line[3:].strip()
+            buf = []
+        else:
+            if current is not None:
+                buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def cmd_compact(
+    strategy: str = "archive-summary",
+    keep_recent: int = 10,
+    threshold: int = 30,
+    dry_run: bool = False,
+    yes: bool = False,
+) -> int:
+    """Compact .moss-mem/tasks/ by archiving old task files.
+
+    Strategies:
+      - archive-summary: move old tasks to .moss-mem/tasks/archive/YYYY/<ts>_<name>.md
+        and rewrite each with only Description + Next Step + Key Decisions + Landmines.
+      - archive-full: same move, but keep the full original body. (Default if strategy unknown.)
+
+    Trigger logic:
+      - Always runs when called manually (compact / state compact).
+      - Auto-suggested (via 🛑 STOP prompt) when task count > threshold.
+        Auto-execution is never silent — the agent must call `state compact` explicitly.
+
+    Returns exit code 0 on success, 1 on validation error, 2 on user abort.
+    """
+    ensure_tasks_dir()
+    if strategy not in ("archive-summary", "archive-full"):
+        safe_print(f"❌ Unknown strategy: {strategy}. Use 'archive-summary' or 'archive-full'.")
+        return 1
+    if keep_recent < 1:
+        safe_print(f"❌ keep_recent must be >= 1 (got {keep_recent}).")
+        return 1
+    if threshold < 1:
+        safe_print(f"❌ threshold must be >= 1 (got {threshold}).")
+        return 1
+
+    tasks_root = Path(TASKS_DIR)
+    if not tasks_root.exists():
+        safe_print(f"⚠️  {TASKS_DIR}/ does not exist. Run `state init` first.")
+        return 1
+
+    # Collect real task files (skip archive index, gitkeep, edit_lock, and any archive/ subdir)
+    candidates: list[Path] = []
+    for p in tasks_root.glob("*.md"):
+        if p.name in _COMPACT_SKIP:
+            continue
+        candidates.append(p)
+    # Also include tasks in archive/ if they are date-stamped files (compacted-archive case)
+    # — but we never re-compact those. Skip them.
+
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)  # newest first
+    total = len(candidates)
+    if total <= keep_recent:
+        safe_print(
+            f"ℹ️  {total} task(s) found, <= keep_recent={keep_recent}. Nothing to compact."
+        )
+        return 0
+
+    to_archive = candidates[keep_recent:]
+    year = datetime.now().strftime("%Y")
+    archive_dir = tasks_root / "archive" / year
+    if not dry_run:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # Estimate token savings by measuring bytes (rough: 1 token ≈ 4 bytes for English/CJK mix)
+    orig_bytes = 0
+    for p in to_archive:
+        orig_bytes += p.stat().st_size
+    est_tokens_before = orig_bytes // 4
+
+    safe_print(f"📊 Compaction plan ({'DRY-RUN' if dry_run else 'LIVE'}):")
+    safe_print(f"   Total tasks:     {total}")
+    safe_print(f"   Keep recent:     {keep_recent}")
+    safe_print(f"   To archive:      {len(to_archive)}")
+    safe_print(f"   Strategy:        {strategy}")
+    safe_print(f"   Archive target:  {archive_dir}")
+    safe_print(f"   Est. tokens before: {est_tokens_before}")
+    if not dry_run:
+        # 🛑 STOP gate — even in non-interactive runs, the user can --yes to skip.
+        if not yes and not dry_run:
+            safe_print("")
+            safe_print("🛑 STOP — confirm to proceed. Re-run with --yes to skip this prompt.")
+            try:
+                answer = input("   Type 'yes' to archive, anything else to abort: ").strip().lower()
+            except EOFError:
+                answer = ""
+            if answer != "yes":
+                safe_print("❌ Aborted. No files moved.")
+                return 2
+
+    moved = 0
+    saved_bytes = 0
+    for src in to_archive:
+        try:
+            content = src.read_text(encoding="utf-8")
+        except OSError as e:
+            safe_print(f"⚠️  Cannot read {src.name}: {e}. Skipping.")
+            continue
+
+        if strategy == "archive-summary":
+            sections = _extract_task_sections(content)
+            keep_keys = ("Description", "Next Step", "Key Decisions", "Landmines")
+            kept = {k: sections.get(k, "") for k in keep_keys}
+            # Drop empty sections
+            kept = {k: v for k, v in kept.items() if v and v != "<!-- pending -->" and v != "<!-- none -->"}
+            new_body = "\n\n".join(f"## {k}\n{v}" for k, v in kept.items())
+            if not new_body.strip():
+                # If a task has no high-signal sections, keep a header so the
+                # archive file isn't empty and grep still finds it.
+                first_line = content.splitlines()[0] if content.splitlines() else src.stem
+                new_body = f"## Description\n{first_line}"
+            new_body = (
+                f"# Compacted from {src.name}\n"
+                f"_Archived at {datetime.now().isoformat(timespec='seconds')}_\n\n"
+                f"{new_body}\n"
+            )
+        else:  # archive-full
+            new_body = content
+
+        dest = archive_dir / f"{get_timestamp()}_{src.name}"
+        if not dry_run:
+            # Atomic write: temp file + rename, so a crash mid-write doesn't
+            # leave a half-written archive file that looks like a real task.
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            try:
+                tmp.write_text(new_body, encoding="utf-8")
+                os.replace(tmp, dest)
+            except OSError as e:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                safe_print(f"❌ Failed to write {dest}: {e}. Aborting further moves.")
+                return 1
+            try:
+                src.unlink()
+            except FileNotFoundError:
+                pass
+            saved_bytes += len(content) - len(new_body)
+        moved += 1
+
+    saved_tokens = max(0, saved_bytes // 4)
+    safe_print("")
+    safe_print(f"✅ Compaction {'(dry-run) ' if dry_run else ''}complete:")
+    safe_print(f"   Archived:        {moved} task(s)")
+    safe_print(f"   Est. tokens saved: ~{saved_tokens}")
+    if not dry_run:
+        safe_print(f"   Archive location: {archive_dir}")
+        safe_print(f"   Next: run `mempalace mine {archive_dir} --wing <project>` to re-index")
+    return 0
+
+
 def _archive_task(task_file: str):
     """Move completed task to archive directory."""
     ensure_tasks_dir()
@@ -1105,6 +1313,27 @@ def main():
 
     state_subs.add_parser("recover", help="Interrupt recovery (alias for 'recover')")
 
+    # ── v4: compaction — keep .moss-mem/tasks/ lean ──
+    state_compact_parser = state_subs.add_parser("compact", help="Archive old task files (auto-suggested when > --threshold)")
+    state_compact_parser.add_argument("--strategy", choices=["archive-summary", "archive-full"], default="archive-summary",
+                                      help="archive-summary keeps Description/Key Decisions/Landmines; archive-full keeps the full body. Default: archive-summary")
+    state_compact_parser.add_argument("--keep-recent", type=int, default=10,
+                                      help="Number of newest task files to keep in tasks/. Default: 10")
+    state_compact_parser.add_argument("--threshold", type=int, default=30,
+                                      help="Task count that triggers a 🛑 STOP prompt suggesting compact. Default: 30")
+    state_compact_parser.add_argument("--dry-run", action="store_true",
+                                      help="Show what would be archived without moving any files")
+    state_compact_parser.add_argument("--yes", "-y", action="store_true",
+                                      help="Skip the 🛑 STOP confirmation prompt")
+
+    # Top-level alias: `compact` ≡ `state compact` (so /moss-mem compact works directly)
+    compact_parser = subparsers.add_parser("compact", help="Alias for 'state compact'")
+    compact_parser.add_argument("--strategy", choices=["archive-summary", "archive-full"], default="archive-summary")
+    compact_parser.add_argument("--keep-recent", type=int, default=10)
+    compact_parser.add_argument("--threshold", type=int, default=30)
+    compact_parser.add_argument("--dry-run", action="store_true")
+    compact_parser.add_argument("--yes", "-y", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -1134,6 +1363,14 @@ def main():
         cmd_knowledge_check(getattr(args, 'strict', False))
     elif args.command == "summary-capture":
         cmd_summary_capture(args.topic, args.summary, args.source, args.decisions, args.next_step, args.related)
+    elif args.command == "compact":
+        sys.exit(cmd_compact(
+            strategy=args.strategy,
+            keep_recent=args.keep_recent,
+            threshold=args.threshold,
+            dry_run=args.dry_run,
+            yes=args.yes,
+        ))
     elif args.command == "state":
         # ── v4 state dispatcher ──
         action = getattr(args, "state_action", None)
@@ -1191,6 +1428,8 @@ def main():
             cmd_start(args.message, "继续推进")
             # then update with the message as last_action
             cmd_update(args.message, "继续推进", "🔧 In Progress", args.message, None, None)
+            # Threshold nudge — never blocks, just reminds the user.
+            check_compact_threshold(threshold=30, source="commit")
         elif action == "note":
             text = args.text or args.note
             if not text:
@@ -1201,6 +1440,14 @@ def main():
             cmd_check(getattr(args, "file", None), getattr(args, "fix", False))
         elif action == "recover":
             cmd_recover()
+        elif action == "compact":
+            sys.exit(cmd_compact(
+                strategy=getattr(args, "strategy", "archive-summary"),
+                keep_recent=getattr(args, "keep_recent", 10),
+                threshold=getattr(args, "threshold", 30),
+                dry_run=getattr(args, "dry_run", False),
+                yes=getattr(args, "yes", False),
+            ))
         else:
             state_parser.print_help()
             sys.exit(1)
