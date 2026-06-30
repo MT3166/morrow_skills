@@ -6,6 +6,7 @@ Handles MEMORY.md and .moss-mem/ for project context persistence.
 
 import argparse
 import atexit
+import builtins
 import os
 import shutil
 import signal
@@ -27,6 +28,39 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except (AttributeError, ValueError):
         pass  # Python < 3.7 or stream already detached (e.g. piped without text mode)
+
+
+# --- Cross-platform file encoding shim ---
+# Windows defaults _open() to the system code page (cp936 / GBK), which can't
+# decode the UTF-8 emoji + Chinese we write into MEMORY.md / task files. Two
+# complementary fixes:
+#   1. Wrap _open() so every file is read/written as UTF-8.
+#   2. Set the default encoding globally for Python 3.7+ via os.fsencode /
+#      PYTHONIOENCODING so subprocesses inherit UTF-8 too.
+# Reference: PEP 540 (UTF-8 mode) and the locale-independent approach used
+# by pip / pip-tools / most modern CLIs.
+try:
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONUTF8", "1")
+except Exception:
+    pass  # environment mutation never fatal
+
+
+def _open(path, mode="r", *args, **kwargs):
+    """_open() wrapper that defaults to UTF-8 and never raises on encode mismatch.
+
+    Strategy:
+      - Text modes ("r", "w", "a", …) get encoding="utf-8" + errors="replace"
+        so we can READ a corrupted GBK-saved file on Windows without crashing,
+        and WRITE any emoji/Chinese without losing bytes.
+      - Binary modes ("rb", "wb", …) pass through untouched.
+      - Callers may override encoding explicitly via kwargs (e.g. tests).
+    """
+    if "b" in mode:
+        return builtins.open(path, mode, *args, **kwargs)
+    kwargs.setdefault("encoding", "utf-8")
+    kwargs.setdefault("errors", "replace")
+    return builtins.open(path, mode, *args, **kwargs)
 
 # Emoji → ASCII fallback table, used only when the console codec can't
 # encode the original character. Keep this table small and obvious; every
@@ -98,7 +132,7 @@ def check_concurrent_edit():
     lock_file = Path(TASKS_DIR) / ".edit_lock"
     if lock_file.exists():
         try:
-            with open(lock_file) as f:
+            with _open(lock_file) as f:
                 data = json.load(f)
                 pid = data.get("pid", "unknown")
                 time = data.get("time", "unknown")
@@ -114,7 +148,7 @@ def acquire_lock():
     ensure_tasks_dir()
     lock_file = Path(TASKS_DIR) / ".edit_lock"
     try:
-        fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        fd = os._open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         with os.fdopen(fd, "w") as f:
             json.dump({"pid": os.getpid(), "time": datetime.now().isoformat()}, f)
         return True
@@ -161,7 +195,7 @@ def _memory_update(updates: dict):
     if not Path(MEMORY_FILE).exists():
         _create_default_memory()
 
-    with open(MEMORY_FILE) as f:
+    with _open(MEMORY_FILE) as f:
         original = f.read()
 
     scratchpad_notes = updates.get("scratchpad_notes", [])
@@ -240,7 +274,7 @@ def _memory_update(updates: dict):
         output_lines.append("## 暂存与备忘区 (Scratchpad) [Free]")
         output_lines.extend(new_scratch_lines)
 
-    with open(MEMORY_FILE, "w") as f:
+    with _open(MEMORY_FILE, "w") as f:
         f.write("\n".join(output_lines))
 
 
@@ -274,7 +308,7 @@ def _create_default_memory():
 ## 已归档任务 [Strict/Append-only]
 <!-- 保留最近 5-10 条记录 -->
 """
-    with open(MEMORY_FILE, "w") as f:
+    with _open(MEMORY_FILE, "w") as f:
         f.write(content)
     safe_print(f"✅ Created default {MEMORY_FILE}")
 
@@ -297,7 +331,7 @@ def cmd_start(description: str, next_step: str):
         ts = get_timestamp()
         task_file = f"{TASKS_DIR}/{ts}_task.md"
 
-        with open(task_file, "w") as f:
+        with _open(task_file, "w") as f:
             f.write(f"---\nname: {ts}_task\ndescription: {description}\ntype: task\n---\n\n")
             f.write(f"# Task - {ts}\n\n")
             f.write(f"## Description\n{description}\n\n")
@@ -436,7 +470,7 @@ def cmd_show(task_file: str = None):
     if not Path(task_file).exists():
         print(f"[ERROR] Task file not found: {task_file}")
         sys.exit(1)
-    with open(task_file) as f:
+    with _open(task_file) as f:
         content = f.read()
     # Strip frontmatter for cleaner output
     lines = content.split("\n")
@@ -468,7 +502,7 @@ def cmd_recover():
         print(f"Current task pointer: {task_file}")
         if Path(task_file).exists():
             print("Task file exists.")
-            with open(task_file) as f:
+            with _open(task_file) as f:
                 content = f.read()
             # Check if Last Action is empty
             if "## Last Action" in content:
@@ -753,7 +787,7 @@ def cmd_check(task_file: str = None, fix: bool = False):
         print(f"[ERROR] Task file not found: {task_file}")
         sys.exit(1)
 
-    with open(task_file) as f:
+    with _open(task_file) as f:
         content = f.read()
 
     issues = []
@@ -817,7 +851,7 @@ def cmd_check(task_file: str = None, fix: bool = False):
                 issues.append("## Landmines is still <!-- none -->")
 
     if fix_applied:
-        with open(task_file, "w") as f:
+        with _open(task_file, "w") as f:
             f.write(content)
         safe_print("✅ Auto-fix applied:")
         for f_msg in fix_applied:
@@ -842,7 +876,7 @@ def get_current_task_file():
     if not Path(MEMORY_FILE).exists():
         return None
 
-    with open(MEMORY_FILE) as f:
+    with _open(MEMORY_FILE) as f:
         content = f.read()
         for line in content.split("\n"):
             if "**当前指针**" in line:
@@ -869,7 +903,7 @@ def _update_task_file(task_file: str, last_action: str = None,
     if not Path(task_file).exists():
         raise FileNotFoundError(f"Task file not found: {task_file}")
 
-    with open(task_file) as f:
+    with _open(task_file) as f:
         content = f.read()
 
     lines = content.split("\n")
@@ -908,11 +942,11 @@ def _update_task_file(task_file: str, last_action: str = None,
         i += 1
 
     written = "\n".join(output)
-    with open(task_file, "w") as f:
+    with _open(task_file, "w") as f:
         f.write(written)
 
     # Verify write succeeded by reading back
-    with open(task_file) as f:
+    with _open(task_file) as f:
         verified = f.read()
     if verified != written:
         raise RuntimeError(f"Write verification failed for {task_file}")
@@ -1107,11 +1141,11 @@ def _archive_task(task_file: str):
 
     task_path = Path(task_file)
     if task_path.exists():
-        with open(task_path) as f:
+        with _open(task_path) as f:
             content = f.read()
         ts = get_timestamp()
         archive_file = archive_dir / f"{ts}_{task_path.name}"
-        with open(archive_file, "w") as f:
+        with _open(archive_file, "w") as f:
             f.write(content)
         try:
             task_path.unlink()
@@ -1128,7 +1162,7 @@ def _append_to_archive(description: str):
     entry = f"\n- [{timestamp}] {description}"
 
     if archive_path.exists():
-        with open(archive_path) as f:
+        with _open(archive_path) as f:
             content = f.read()
         content += entry
     else:
@@ -1136,7 +1170,7 @@ def _append_to_archive(description: str):
 
     tmp_path = archive_path.with_suffix(".tmp")
     try:
-        with open(tmp_path, "w") as f:
+        with _open(tmp_path, "w") as f:
             f.write(content)
         os.replace(tmp_path, archive_path)
     except Exception as e:
@@ -1187,7 +1221,7 @@ def cmd_init():
 
     archive_path = Path(TASKS_DIR) / ARCHIVE_FILE
     if not archive_path.exists():
-        with open(archive_path, "w") as f:
+        with _open(archive_path, "w") as f:
             f.write(f"# MEMORY Archive\n\n## Completed Tasks\n")
         safe_print(f"✅ {archive_path} created")
     if Path(MEMORY_FILE).exists():
