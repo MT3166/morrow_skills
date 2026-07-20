@@ -125,8 +125,12 @@ Use these four gated steps at session end:
 2. Run `state validate --fix`, then validate again. Exit 0 proceeds to Step 4.
 3. Set `last_action`, `key_decisions`, and `landmines`; run `state show` and
    verify all three are filled, repeating as needed.
-4. Set `status="✅"`, run `state commit -m "<handoff summary>"`, then run
-   `state show` and verify the pointer and status.
+4. Run `state set status="✅" current_task="<handoff summary>"` once. This
+   completes and archives the current task; do not run `state commit` after it.
+   Verify `MEMORY.md` reports `✅ Completed` and that an archive file appears in
+   `.moss-mem/tasks/archive/` (with a completion record in `ARCHIVE.md`). Start
+   a new task with a separate `state commit` only after this handoff is
+   complete.
 
 Step 3 is a checkpoint: show drafted decisions and landmines before writing.
 
