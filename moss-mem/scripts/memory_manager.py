@@ -730,7 +730,10 @@ def _matching_excerpt(record, query, terms):
 def _search_records(payload, query, limit):
     if limit < 1: raise ValueError("limit must be >= 1")
     terms = list(dict.fromkeys(_tokenize(query))); ids = set()
-    for term in terms: ids.update(payload.get("inverted_terms", {}).get(term, []))
+    if terms:
+        for term in terms: ids.update(payload.get("inverted_terms", {}).get(term, []))
+    else:
+        ids.update(record["id"] for record in payload.get("records", []))
     by_id = {r["id"]: r for r in payload["records"]}; out = []
     for rid in ids:
         if rid in by_id:
@@ -740,7 +743,13 @@ def _search_records(payload, query, limit):
 def _backup_corrupt_index():
     path = Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE
     if not path.exists(): return None
-    backup = path.with_name(f"{path.name}.bak.{get_timestamp()}"); os.replace(path, backup); return backup
+    stem = path.with_name(f"{path.name}.bak.{get_timestamp()}")
+    backup = stem
+    suffix = 2
+    while backup.exists():
+        backup = path.with_name(f"{stem.name}-{suffix}")
+        suffix += 1
+    os.replace(path, backup); return backup
 def cmd_memory_search(query, limit=10):
     query = query.strip()
     if not query: safe_print("❌ search query must not be empty"); return 1
@@ -755,6 +764,9 @@ def cmd_memory_search(query, limit=10):
         if cmd_knowledge_index():
             try: payload = _load_index_payload()
             except (OSError, json.JSONDecodeError): payload = None
+            else:
+                if _index_problem(payload):
+                    payload = None
     if payload is None:
         safe_print("[INDEX-FALLBACK] scanning Markdown sources directly")
         try: payload, warnings = _build_index_payload()

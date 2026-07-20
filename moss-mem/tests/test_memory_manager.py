@@ -48,6 +48,21 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertIn("kind=archived-task", result.stdout); self.assertIn("20260719_task.md", result.stdout)
         self.assertIn("token refresh race", result.stdout)
         self.assertLess(result.stdout.index("20260719_task.md"), result.stdout.find("[2] ") if "[2] " in result.stdout else len(result.stdout))
+        self.assertRegex(result.stdout, r"\[1\] score=[1-9][0-9]* kind=archived-task")
+
+    def test_memory_search_rebuild_recheck_failure_falls_back_once(self):
+        self._write_index_fixture()
+        module_spec = importlib.util.spec_from_file_location("memory_manager_recheck", SCRIPT)
+        module = importlib.util.module_from_spec(module_spec); module_spec.loader.exec_module(module)
+        output = io.StringIO(); previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            with mock.patch.object(module, "_load_index_payload", side_effect=[FileNotFoundError, {"schema_version": 1, "sources": {}, "records": [], "inverted_terms": {}}]), mock.patch.object(module, "cmd_knowledge_index", return_value=True) as rebuild, mock.patch("sys.stdout", output):
+                self.assertEqual(module.cmd_memory_search("httpOnly cookie"), 0)
+        finally:
+            os.chdir(previous)
+        self.assertEqual(rebuild.call_count, 1)
+        self.assertIn("[INDEX-FALLBACK]", output.getvalue())
 
     def test_memory_search_rebuilds_corrupt_json_index(self):
         self._write_index_fixture(); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
@@ -65,6 +80,30 @@ class MemoryManagerCLITest(unittest.TestCase):
                 exit_code = module.cmd_memory_search("httpOnly cookie")
         finally: os.chdir(previous)
         self.assertEqual(exit_code, 0); self.assertIn("[INDEX-FALLBACK]", output.getvalue()); self.assertIn("20260720-auth.md", output.getvalue())
+
+    def test_memory_search_direct_fallback_when_index_write_fails(self):
+        self._write_index_fixture(); module_spec = importlib.util.spec_from_file_location("memory_manager_write_fail", SCRIPT)
+        module = importlib.util.module_from_spec(module_spec); module_spec.loader.exec_module(module)
+        output = io.StringIO(); previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            with mock.patch.object(module, "_write_index_files", side_effect=OSError("disk full")), mock.patch("sys.stdout", output):
+                self.assertEqual(module.cmd_memory_search("httpOnly cookie"), 0)
+        finally: os.chdir(previous)
+        self.assertIn("[INDEX-FALLBACK]", output.getvalue())
+
+    def test_search_edge_cases_and_backup_collision(self):
+        self._write_index_fixture(); module = memory_manager
+        cache = self.project / ".moss-mem/index-cache"; cache.mkdir(parents=True)
+        index = cache / "memory-index.json"; index.write_text("bad", encoding="utf-8")
+        with mock.patch.object(module, "INDEX_CACHE_DIR", str(cache)), mock.patch.object(module, "get_timestamp", return_value="fixed"):
+            first = module._backup_corrupt_index(); index.write_text("bad2", encoding="utf-8"); second = module._backup_corrupt_index()
+        self.assertNotEqual(first, second); self.assertTrue(second.name.endswith("-2"))
+        payload = {"records": [{"id": 1, "title": "中文", "sections": {"Summary": "中文测试"}, "preview": "中文测试", "mtime_ns": 1, "path": "x.md", "kind": "memory"}], "inverted_terms": {"中": [1]}}
+        self.assertIsInstance(module._search_records(payload, "!!!", 10), list)
+        self.assertTrue(module._search_records(payload, "中", 10))
+        self.assertTrue(module._search_records(payload, "中文", 10))
+        with self.assertRaises(ValueError): module._search_records(payload, "x", 0)
 
     def test_cli_help_loads_on_python39(self):
         result = self.run_cli("--help")
