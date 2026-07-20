@@ -14,7 +14,9 @@ import shutil
 import signal
 import sys
 import json
+import re
 import subprocess
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -114,6 +116,9 @@ SUMMARIES_DIR = ".moss-mem/summaries"
 INDEX_CACHE_DIR = ".moss-mem/index-cache"
 ARCHIVE_FILE = "MEMORY_ARCHIVE.md"
 OLD_TASKS_DIR = "MEMORY_TASKS"  # legacy — migrated on init
+INDEX_SCHEMA_VERSION = 1
+INDEX_JSON_FILE = "memory-index.json"
+INDEX_MD_FILE = "memory-index.md"
 
 # Auto-detect script location so callers don't need absolute paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -605,32 +610,137 @@ def cmd_knowledge_init(domain: str = None):
 
 
 def cmd_knowledge_index():
-    """Regenerate a memory-only index under .moss-mem/index-cache/."""
-    ensure_tasks_dir()
-    Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
+    """Regenerate dependency-free JSON and Markdown memory indexes."""
+    try:
+        payload, warnings = _build_index_payload()
+        _write_index_files(payload, warnings)
+    except (OSError, ValueError) as exc:
+        safe_print(f"❌ Memory index failed: {exc}")
+        return False
+    safe_print(f"✅ Memory index written: {len(payload['records'])} record(s)")
+    for warning in warnings:
+        safe_print(f"⚠️  {warning}")
+    return True
+
+
+def _discover_memory_sources():
+    paths = []
+    memory = Path(MEMORY_FILE)
+    if memory.is_file():
+        paths.append(memory)
+    for root in (Path(TASKS_DIR), Path(SUMMARIES_DIR)):
+        if root.exists():
+            paths.extend(path for path in root.rglob("*.md") if path.is_file())
+    return sorted(set(paths), key=lambda path: str(path))
+
+
+def _tokenize(text):
+    normalized = text.lower()
+    terms = re.findall(r"[a-z0-9_]+", normalized)
+    for chunk in re.findall(r"[\u3400-\u9fff]+", normalized):
+        terms.extend(chunk)
+        terms.extend(chunk[index:index + 2] for index in range(len(chunk) - 1))
+    return terms
+
+
+def _classify_source(path):
+    if path == Path(MEMORY_FILE):
+        return "memory"
+    if Path(SUMMARIES_DIR) in path.parents:
+        return "summary"
+    if "archive" in path.parts:
+        return "archived-task"
+    if path.name == ARCHIVE_FILE:
+        return "archive-index"
+    return "task"
+
+
+def _parse_memory_record(path, record_id):
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    frontmatter, body_start = {}, 0
+    if lines and lines[0].strip() == "---":
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                body_start = index + 1
+                break
+            if ":" in lines[index]:
+                key, value = lines[index].split(":", 1)
+                frontmatter[key.strip()] = value.strip().strip('"')
+    title, sections, current, buffer = path.stem, {}, None, []
+    for line in lines[body_start:]:
+        if line.startswith("# ") and title == path.stem:
+            title = line[2:].strip()
+        if line.startswith("## "):
+            if current is not None:
+                sections[current] = "\n".join(buffer).strip()
+            current, buffer = line[3:].strip(), []
+        elif current is not None:
+            buffer.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buffer).strip()
+    created = frontmatter.get("created", "") or (sections.get("Created", "").splitlines()[0].strip() if sections.get("Created") else "")
+    preview_source = next((sections[name] for name in ("Description", "Summary", "Key Decisions", "Decisions", "Next Step") if sections.get(name)), title)
+    return {"id": record_id, "path": str(path), "kind": _classify_source(path), "title": frontmatter.get("topic") or frontmatter.get("description") or title, "created": created, "mtime_ns": path.stat().st_mtime_ns, "sections": sections, "preview": " ".join(preview_source.split())[:240]}
+
+
+def _current_source_metadata():
+    return {str(path): path.stat().st_mtime_ns for path in _discover_memory_sources()}
+
+
+def _build_index_payload():
+    records, warnings, inverted = [], [], defaultdict(set)
+    for path in _discover_memory_sources():
+        try:
+            record = _parse_memory_record(path, len(records))
+        except (OSError, UnicodeError) as exc:
+            warnings.append(f"skipped unreadable source {path}: {exc}")
+            continue
+        records.append(record)
+        for term in _tokenize(" ".join([record["title"], *record["sections"].values()])):
+            inverted[term].add(record["id"])
+    if not records:
+        raise ValueError("no readable memory sources")
+    return {"schema_version": INDEX_SCHEMA_VERSION, "generated_at": datetime.now().isoformat(timespec="seconds"), "sources": {r["path"]: r["mtime_ns"] for r in records}, "records": records, "inverted_terms": {t: sorted(ids) for t, ids in sorted(inverted.items())}}, warnings
+
+
+def _render_index_markdown(payload, warnings):
+    labels = [("memory", "Memory"), ("task", "Tasks"), ("archived-task", "Archived Tasks"), ("archive-index", "Archive Indexes"), ("summary", "Summaries")]
+    lines = ["# moss-mem Memory Index", "", f"Generated: {payload['generated_at']}", f"Records: {len(payload['records'])}"]
+    for kind, label in labels:
+        lines.extend(["", f"## {label}"])
+        matches = [r for r in payload["records"] if r["kind"] == kind]
+        if matches:
+            for record in matches:
+                lines.append(f"- `{record['path']}` | {record['title']}" + (f" | {record['created']}" if record["created"] else ""))
+                lines.append(f"  - {record['preview']}")
+        else:
+            lines.append("- <!-- none -->")
+    if warnings:
+        lines.extend(["", "## Warnings", *[f"- {w}" for w in warnings]])
+    return "\n".join(lines) + "\n"
+
+
+def _write_index_files(payload, warnings):
     Path(INDEX_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-    index_path = Path(INDEX_CACHE_DIR) / "memory-index.md"
-    task_files = sorted(Path(TASKS_DIR).glob("*_task.md"))
-    summary_files = sorted(Path(SUMMARIES_DIR).glob("*.md"))
-    lines = [
-        "# moss-mem Memory Index",
-        "",
-        "Generated from `.moss-mem/tasks/` and `.moss-mem/summaries/`.",
-        "Do not hand-edit; rerun `moss-mem knowledge-index`.",
-        "",
-        "## Tasks",
-    ]
-    if task_files:
-        lines.extend(f"- `{p}`" for p in task_files)
-    else:
-        lines.append("- <!-- none -->")
-    lines.extend(["", "## Summaries"])
-    if summary_files:
-        lines.extend(f"- `{p}`" for p in summary_files)
-    else:
-        lines.append("- <!-- none -->")
-    index_path.write_text("\n".join(lines) + "\n")
-    safe_print(f"✅ Memory index written: {index_path}")
+    outputs = {Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE: json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", Path(INDEX_CACHE_DIR) / INDEX_MD_FILE: _render_index_markdown(payload, warnings)}
+    previous = {p: p.read_bytes() if p.exists() else None for p in outputs}; temp_paths = {}
+    try:
+        for path, text in outputs.items():
+            temp = path.with_suffix(path.suffix + ".tmp"); temp.write_text(text, encoding="utf-8"); temp_paths[path] = temp
+        for path, temp in temp_paths.items(): os.replace(temp, path)
+    except OSError:
+        for path, content in previous.items():
+            if content is None:
+                try: path.unlink()
+                except FileNotFoundError: pass
+            else:
+                restore = path.with_suffix(path.suffix + ".restore"); restore.write_bytes(content); os.replace(restore, path)
+        raise
+    finally:
+        for temp in temp_paths.values():
+            try: temp.unlink()
+            except FileNotFoundError: pass
 
 
 def cmd_knowledge_check(strict: bool = False):
@@ -1394,7 +1504,7 @@ def main():
     elif args.command == "knowledge-init":
         cmd_knowledge_init(getattr(args, 'domain', None))
     elif args.command == "knowledge-index":
-        cmd_knowledge_index()
+        sys.exit(0 if cmd_knowledge_index() else 1)
     elif args.command == "knowledge-check":
         cmd_knowledge_check(getattr(args, 'strict', False))
     elif args.command == "summary-capture":
