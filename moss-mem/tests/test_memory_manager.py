@@ -236,6 +236,43 @@ class MemoryManagerCLITest(unittest.TestCase):
                 self.assertIn("memory index is stale: schema mismatch", strict.stdout)
                 self.assertNotIn("Traceback", strict.stdout + strict.stderr)
 
+    def test_knowledge_check_rejects_malformed_generated_schema(self):
+        self._write_index_fixture(); (self.project / ".moss-mem/tasks/MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8"); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        cache = self.project / ".moss-mem/index-cache"; index_path = cache / "memory-index.json"
+        valid = json.loads(index_path.read_text(encoding="utf-8"))
+        cases = []
+        for value in (None,):
+            p = json.loads(json.dumps(valid)); p["records"] = value; cases.append(p)
+        p = json.loads(json.dumps(valid)); del p["records"][0]["title"]; cases.append(p)
+        p = json.loads(json.dumps(valid)); p["inverted_terms"] = []; cases.append(p)
+        p = json.loads(json.dumps(valid)); p["inverted_terms"] = {"ghost": [999999]}; cases.append(p)
+        for payload in cases:
+            index_path.write_text(json.dumps(payload), encoding="utf-8")
+            result = self.run_cli("knowledge-check", "--strict")
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertIn("schema mismatch", result.stdout); self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_knowledge_check_valid_json_warns_on_invalid_markdown(self):
+        self._write_index_fixture(); (self.project / ".moss-mem/tasks/MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8"); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        markdown = self.project / ".moss-mem/index-cache/memory-index.md"
+        markdown.write_text("# wrong\nRecords: 0\n", encoding="utf-8")
+        normal = self.run_cli("knowledge-check")
+        self.assertEqual(normal.returncode, 0, normal.stderr + normal.stdout)
+        self.assertIn("memory markdown index is invalid", normal.stdout)
+        strict = self.run_cli("knowledge-check", "--strict")
+        self.assertEqual(strict.returncode, 1, strict.stderr + strict.stdout)
+        self.assertIn("memory markdown index is invalid", strict.stdout)
+
+    def test_memory_search_rebuilds_schema_mismatch_index(self):
+        self._write_index_fixture(); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        index_path = self.project / ".moss-mem/index-cache/memory-index.json"
+        payload = json.loads(index_path.read_text(encoding="utf-8")); payload["records"] = None
+        index_path.write_text(json.dumps(payload), encoding="utf-8")
+        result = self.run_cli("memory-search", "httpOnly cookie")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Rebuilding local memory index: schema mismatch", result.stdout)
+        self.assertIn("httpOnly cookie", result.stdout); self.assertNotIn("Traceback", result.stdout + result.stderr)
+
     def test_summary_capture_recommends_local_reindex_only(self):
         result = self.run_cli(
             "summary-capture", "-t", "auth", "-s", "cookie decision",

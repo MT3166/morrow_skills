@@ -710,11 +710,49 @@ def _load_index_payload():
 def _index_problem(payload):
     if not isinstance(payload, dict): return "schema mismatch"
     if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
+    if not isinstance(payload.get("generated_at"), str) or not payload["generated_at"].strip(): return "schema mismatch"
     indexed = payload.get("sources")
     if not isinstance(indexed, dict): return "schema mismatch"
+    if any(not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool) or v < 0 for k, v in indexed.items()): return "schema mismatch"
+    records = payload.get("records")
+    if not isinstance(records, list) or not records: return "schema mismatch"
+    allowed = {"memory", "task", "archived-task", "archive-index", "summary"}
+    ids = set()
+    required = {"id", "path", "kind", "title", "created", "mtime_ns", "sections", "preview"}
+    for record in records:
+        if not isinstance(record, dict) or set(record) < required: return "schema mismatch"
+        if (not isinstance(record["id"], int) or isinstance(record["id"], bool) or record["id"] < 0 or record["id"] in ids
+                or not isinstance(record["path"], str) or not isinstance(record["kind"], str) or record["kind"] not in allowed
+                or not isinstance(record["title"], str) or not isinstance(record["created"], str)
+                or not isinstance(record["mtime_ns"], int) or isinstance(record["mtime_ns"], bool) or record["mtime_ns"] < 0
+                or not isinstance(record["sections"], dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in record["sections"].items())
+                or not isinstance(record["preview"], str)):
+            return "schema mismatch"
+        ids.add(record["id"])
+        if indexed.get(record["path"]) != record["mtime_ns"]: return "schema mismatch"
+    if set(indexed) != {r["path"] for r in records}: return "schema mismatch"
+    inverted = payload.get("inverted_terms")
+    if not isinstance(inverted, dict): return "schema mismatch"
+    for term, refs in inverted.items():
+        if not isinstance(term, str) or not isinstance(refs, list) or any(not isinstance(i, int) or isinstance(i, bool) or i not in ids for i in refs) or len(refs) != len(set(refs)): return "schema mismatch"
     current = _current_source_metadata()
     if set(current) != set(indexed): return "source set changed"
     if any(current[p] != indexed[p] for p in current): return "source modified"
+    return None
+
+def _markdown_index_problem(payload):
+    path = Path(INDEX_CACHE_DIR) / INDEX_MD_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError: return "missing file"
+    except (OSError, UnicodeError) as exc: return str(exc)
+    lines = text.splitlines()
+    if not lines or lines[0] != "# moss-mem Memory Index": return "invalid header"
+    if not any(line.startswith("Generated: ") and line[10:].strip() for line in lines): return "missing Generated line"
+    count = next((line for line in lines if line.startswith("Records: ")), None)
+    if count is None or not count[9:].isdigit() or int(count[9:]) != len(payload["records"]): return "record count mismatch"
+    for record in payload["records"]:
+        if f"- `{record['path']}`" not in text: return f"missing record path: {record['path']}"
     return None
 def _record_weighted_fields(record):
     return [(record["title"], FIELD_WEIGHTS["title"])] + [(v, FIELD_WEIGHTS.get(k, 1)) for k, v in record["sections"].items()]
@@ -859,6 +897,9 @@ def cmd_knowledge_check(strict: bool = False):
                 warnings.append(f"memory index is stale: {problem}")
             else:
                 safe_print("✅ memory index is fresh")
+                markdown_problem = _markdown_index_problem(payload)
+                if markdown_problem:
+                    warnings.append(f"memory markdown index is invalid: {markdown_problem}")
         except json.JSONDecodeError:
             warnings.append(f"memory index is corrupt: {json_index}")
         except OSError as exc:
