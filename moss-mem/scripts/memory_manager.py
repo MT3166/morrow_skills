@@ -4,6 +4,8 @@ MOSS_MEM - Memory Management Script
 Handles MEMORY.md and .moss-mem/ for project context persistence.
 """
 
+from __future__ import annotations
+
 import argparse
 import atexit
 import builtins
@@ -148,7 +150,7 @@ def acquire_lock():
     ensure_tasks_dir()
     lock_file = Path(TASKS_DIR) / ".edit_lock"
     try:
-        fd = os._open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         with os.fdopen(fd, "w") as f:
             json.dump({"pid": os.getpid(), "time": datetime.now().isoformat()}, f)
         return True
