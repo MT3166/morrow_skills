@@ -704,6 +704,68 @@ def _build_index_payload():
     return {"schema_version": INDEX_SCHEMA_VERSION, "generated_at": datetime.now().isoformat(timespec="seconds"), "sources": {r["path"]: r["mtime_ns"] for r in records}, "records": records, "inverted_terms": {t: sorted(ids) for t, ids in sorted(inverted.items())}}, warnings
 
 
+FIELD_WEIGHTS = {"title": 8, "Description": 5, "Summary": 5, "Decisions": 5, "Key Decisions": 5, "Landmines": 5, "Related Files": 3, "Next Step": 3}
+def _load_index_payload():
+    with _open(Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE) as handle: return json.load(handle)
+def _index_problem(payload):
+    if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
+    current, indexed = _current_source_metadata(), payload.get("sources", {})
+    if set(current) != set(indexed): return "source set changed"
+    if any(current[p] != indexed[p] for p in current): return "source modified"
+    return None
+def _record_weighted_fields(record):
+    return [(record["title"], FIELD_WEIGHTS["title"])] + [(v, FIELD_WEIGHTS.get(k, 1)) for k, v in record["sections"].items()]
+def _score_record(record, query, terms):
+    nq, score = " ".join(query.lower().split()), 0
+    for value, weight in _record_weighted_fields(record):
+        nv = " ".join(value.lower().split()); vt = _tokenize(nv); score += sum(vt.count(t) * weight for t in terms)
+        if nq and nq in nv: score += 10
+    return score
+def _matching_excerpt(record, query, terms):
+    nq = " ".join(query.lower().split())
+    for value, _ in sorted(_record_weighted_fields(record), key=lambda x: -x[1]):
+        flat = " ".join(value.split())
+        if nq in flat.lower() or any(t in _tokenize(flat.lower()) for t in terms): return flat[:240]
+    return record["preview"][:240]
+def _search_records(payload, query, limit):
+    if limit < 1: raise ValueError("limit must be >= 1")
+    terms = list(dict.fromkeys(_tokenize(query))); ids = set()
+    for term in terms: ids.update(payload.get("inverted_terms", {}).get(term, []))
+    by_id = {r["id"]: r for r in payload["records"]}; out = []
+    for rid in ids:
+        if rid in by_id:
+            r = by_id[rid]; s = _score_record(r, query, terms)
+            if s > 0: out.append({"score": s, "record": r, "excerpt": _matching_excerpt(r, query, terms)})
+    out.sort(key=lambda x: (-x["score"], -x["record"]["mtime_ns"], x["record"]["path"])); return out[:limit]
+def _backup_corrupt_index():
+    path = Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE
+    if not path.exists(): return None
+    backup = path.with_name(f"{path.name}.bak.{get_timestamp()}"); os.replace(path, backup); return backup
+def cmd_memory_search(query, limit=10):
+    query = query.strip()
+    if not query: safe_print("❌ search query must not be empty"); return 1
+    if limit < 1: safe_print("❌ limit must be >= 1"); return 1
+    payload, reason = None, None
+    try: payload = _load_index_payload(); reason = _index_problem(payload)
+    except FileNotFoundError: reason = "missing index"
+    except json.JSONDecodeError: _backup_corrupt_index(); reason = "corrupt index"
+    except OSError: reason = "unreadable index"
+    if reason:
+        safe_print(f"Rebuilding local memory index: {reason}")
+        if cmd_knowledge_index():
+            try: payload = _load_index_payload()
+            except (OSError, json.JSONDecodeError): payload = None
+    if payload is None:
+        safe_print("[INDEX-FALLBACK] scanning Markdown sources directly")
+        try: payload, warnings = _build_index_payload()
+        except (OSError, ValueError) as exc: safe_print(f"❌ Memory search failed: {exc}"); return 1
+        for warning in warnings: safe_print(f"⚠️  {warning}")
+    results = _search_records(payload, query, limit)
+    if not results: safe_print(f"[NO_MATCH] query={query} sources={len(payload['records'])}"); return 0
+    for i, result in enumerate(results, 1):
+        r = result["record"]; safe_print(f"[{i}] score={result['score']} kind={r['kind']} path={r['path']}"); safe_print(f"    title={r['title']}"); safe_print(f"    excerpt={result['excerpt']}")
+    return 0
+
 def _render_index_markdown(payload, warnings):
     labels = [("memory", "Memory"), ("task", "Tasks"), ("archived-task", "Archived Tasks"), ("archive-index", "Archive Indexes"), ("summary", "Summaries")]
     lines = ["# moss-mem Memory Index", "", f"Generated: {payload['generated_at']}", f"Records: {len(payload['records'])}"]
@@ -1427,6 +1489,9 @@ def main():
                                        help="Ignored compatibility option")
 
     subparsers.add_parser("knowledge-index", help="Regenerate .moss-mem/index-cache/memory-index.md")
+    memory_search_parser = subparsers.add_parser("memory-search", help="Search the local generated memory index")
+    memory_search_parser.add_argument("query")
+    memory_search_parser.add_argument("--limit", type=int, default=10)
 
     knowledge_check_parser = subparsers.add_parser("knowledge-check", help="Validate moss-mem memory layout")
     knowledge_check_parser.add_argument("--strict", action="store_true", help="Fail when memory index warnings are present")
@@ -1515,6 +1580,8 @@ def main():
         cmd_knowledge_init(getattr(args, 'domain', None))
     elif args.command == "knowledge-index":
         sys.exit(0 if cmd_knowledge_index() else 1)
+    elif args.command == "memory-search":
+        sys.exit(cmd_memory_search(args.query, args.limit))
     elif args.command == "knowledge-check":
         cmd_knowledge_check(getattr(args, 'strict', False))
     elif args.command == "summary-capture":

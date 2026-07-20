@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,39 @@ class MemoryManagerCLITest(unittest.TestCase):
             text=True,
             encoding="utf-8",
         )
+
+    def _write_index_fixture(self):
+        (self.project / ".moss-mem/tasks/archive/2026").mkdir(parents=True)
+        (self.project / ".moss-mem/summaries").mkdir(parents=True)
+        (self.project / "MEMORY.md").write_text("# MEMORY.md\n\n## 下一步指令 [Strict]\n- run tests\n", encoding="utf-8")
+        (self.project / ".moss-mem/tasks/20260720-100000_task.md").write_text("# Task - Login\n\n## Description\nRepair login\n", encoding="utf-8")
+        (self.project / ".moss-mem/tasks/archive/2026/20260719_task.md").write_text("# Compacted Login Task\n\n## Key Decisions\ntoken refresh race\n", encoding="utf-8")
+        (self.project / ".moss-mem/summaries/20260720-auth.md").write_text("---\ntopic: auth summary\ncreated: 2026-07-20 10:00\n---\n\n# Harness Summary\n\n## Summary\nUse httpOnly cookie\n", encoding="utf-8")
+
+    def test_memory_search_ranks_archived_key_decision_first(self):
+        self._write_index_fixture(); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        result = self.run_cli("memory-search", "token refresh race", "--limit", "3")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("kind=archived-task", result.stdout); self.assertIn("20260719_task.md", result.stdout)
+        self.assertIn("token refresh race", result.stdout)
+        self.assertLess(result.stdout.index("20260719_task.md"), result.stdout.find("[2] ") if "[2] " in result.stdout else len(result.stdout))
+
+    def test_memory_search_rebuilds_corrupt_json_index(self):
+        self._write_index_fixture(); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        json_path = self.project / ".moss-mem/index-cache/memory-index.json"; json_path.write_text("{broken", encoding="utf-8")
+        result = self.run_cli("memory-search", "httpOnly cookie")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout); self.assertIn("Rebuilding local memory index", result.stdout)
+        self.assertIn("20260720-auth.md", result.stdout); self.assertTrue(list(json_path.parent.glob("memory-index.json.bak.*"))); json.loads(json_path.read_text(encoding="utf-8"))
+
+    def test_memory_search_direct_scans_when_rebuild_fails(self):
+        self._write_index_fixture(); spec = importlib.util.spec_from_file_location("memory_manager_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); previous = Path.cwd(); output = io.StringIO()
+        try:
+            os.chdir(self.project)
+            with mock.patch.object(module, "cmd_knowledge_index", return_value=False), mock.patch("sys.stdout", output):
+                exit_code = module.cmd_memory_search("httpOnly cookie")
+        finally: os.chdir(previous)
+        self.assertEqual(exit_code, 0); self.assertIn("[INDEX-FALLBACK]", output.getvalue()); self.assertIn("20260720-auth.md", output.getvalue())
 
     def test_cli_help_loads_on_python39(self):
         result = self.run_cli("--help")
