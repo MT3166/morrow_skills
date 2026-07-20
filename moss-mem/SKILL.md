@@ -72,9 +72,17 @@ python3 {base}/scripts/memory_manager.py state note "found refresh race"
 python3 {base}/scripts/memory_manager.py state validate --fix
 ```
 
-The task record fields are `current_task` (string), `next_step` (string),
-`status` (`🔧`, `✅`, or `❌`), `last_action`, `key_decisions` (list),
-`landmines` (list), and auto-filled `created` ISO timestamp.
+Task record schema:
+
+| Field | Required | Default | Purpose |
+|---|---|---|---|
+| `current_task` | optional | `(待补)` | Current task description. |
+| `next_step` | optional | `等待下一步指令` | Next actionable handoff step. |
+| `status` | required | `🔧` | Task state; one of `🔧`, `✅`, or `❌`. |
+| `last_action` | optional | `<!-- pending -->` | Most recent completed action. |
+| `key_decisions` | optional list | `<!-- pending -->` | Decisions that constrain follow-up work. |
+| `landmines` | optional list | `<!-- none -->` | Risks, hazards, or unresolved constraints. |
+| `created` | auto | ISO timestamp | Task creation time. |
 
 > **P9 trap:** `key_decisions`, `last_action`, or `landmines` set before the
 > first `state commit` for a task land in the scratchpad, not its task file.
@@ -129,7 +137,7 @@ Step 3 is a checkpoint: show drafted decisions and landmines before writing.
 | Missing `MEMORY.md` | Run `state init`, then commit a task. |
 | Stale `.edit_lock` | Run `recover`; if still stale, remove the lock with the platform command and validate. |
 | Search index missing/corrupt/stale | Attempt one `knowledge-index` rebuild; only if it fails or the rebuilt index still cannot load, continue with `[INDEX-FALLBACK]` source search. |
-| Empty search | Widen the query and search source Markdown directly. |
+| Empty search | Widen the query and rerun `memory-search`; direct source Markdown scanning is performed only internally by the command in `[INDEX-FALLBACK]` mode. |
 | Incomplete handoff fields | Run `state validate --fix`, then set remaining fields and validate. |
 | Strict layout check fails | Fix paths or rebuild with `knowledge-index`; record unresolved issues as landmines. |
 | Compact write fails | Source file remains in place; fix disk/permissions and rerun. |
