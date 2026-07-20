@@ -1,113 +1,20 @@
 [
   {
     "id": 1,
-    "prompt": "开始一个新任务：实现登录功能，下一步是写auth.py",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py start -d '实现登录功能' -n '写auth.py'",
-    "type": "start_task"
+    "prompt": "项目环境只有 Python 标准库。初始化记忆、创建任务和 session summary 后，生成本地索引。",
+    "expected": "生成 .moss-mem/index-cache/memory-index.json 和 memory-index.md；两者包含任务与 summary，过程不安装或调用外部记忆服务。",
+    "type": "local_index_generation"
   },
   {
     "id": 2,
-    "prompt": "更新任务进度：已完成auth.py重构，下一步是测试登录，状态进行中",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py update -d '已完成auth.py重构' -n '测试登录' -s '🔧'",
-    "type": "update_task"
+    "prompt": "搜索 token refresh race；它只存在于归档任务的 Key Decisions 中。",
+    "expected": "memory-search 返回该归档任务且排名第一，输出 score、kind、path、title 和命中摘要。",
+    "type": "ranked_archive_search"
   },
   {
     "id": 3,
-    "prompt": "查看当前任务状态",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py show 读取并展示当前任务文件",
-    "type": "show_task"
-  },
-  {
-    "id": 4,
-    "prompt": "现在要交接给下一个 Agent，请完成交接流程",
-    "expected": "依次执行 check → check --fix → update -d 'Handoff fields filled' -n '<next step>' -s '🔧' -l/-k/-m → diary write → complete → start，填写 Last Action / Key Decisions / Landmines 三个字段，写入 AAAK 格式日记",
-    "type": "handoff_protocol"
-  },
-  {
-    "id": 5,
-    "prompt": "开始一个新任务：搭建 CI 流水线，下一步是编写 pipeline 配置",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py start -d '搭建 CI 流水线' -n '编写 pipeline 配置'",
-    "type": "start_task_variant"
-  },
-  {
-    "id": 6,
-    "prompt": "搜索一下之前做过的认证相关的任务",
-    "expected": "用 `mempalace search \"认证\" --wing <project>` 走语义搜索；CLI 不可用时 fallback `grep -r \"认证\" MEMORY.md .moss-mem/`，标注 'keyword match only'",
-    "type": "cli_search"
-  },
-  {
-    "id": 7,
-    "prompt": "写一条会话日记：今天完成了 JWT 认证中间件的重构，关键决策是将 token 存在 httpOnly cookie 而非 localStorage",
-    "expected": "用 `state note \"...\"` 把 AAAK 条目写到当前 task scratchpad；AAAK: SESSION:YYYY-MM-DD|auth.middleware|refactored.JWT|KEY.dec:cookies.over.localStorage|★★★。注：MCP-only 的 mempalace_diary_write 不可达，统一走文件 scratchpad",
-    "type": "cli_diary"
-  },
-  {
-    "id": 8,
-    "prompt": "我离开了一段时间，帮我恢复上下文，看看之前在做什么",
-    "expected": "执行2步恢复：state show → mempalace wake-up --wing <project>（CLI），合成 Context Recovery 摘要含 Current Task / Recent Activity / Key Decisions / Landmines / Recommended Next Action",
-    "type": "cli_context"
-  },
-  {
-    "id": 9,
-    "prompt": "把 API 限流这个任务和之前 API 安全加固的任务关联起来",
-    "expected": "用 `state set key_decisions=\"...\"` 在当前 task 写明关联关系；CLI 无 KG/tunnel 子命令，关联关系落到文件层；输出 🔗 Link Noted (file-only) 格式",
-    "type": "cli_link"
-  },
-  {
-    "id": 10,
-    "prompt": "按 memory-only scope 初始化 moss-mem，项目是一个 web 应用",
-    "expected": "使用 {base_dir}/scripts/memory_manager.py knowledge-init --domain web；只生成 MEMORY.md、.moss-mem/tasks/、.moss-mem/summaries/、.moss-mem/index-cache/；明确不创建 AGENTS.md、ARCHITECTURE.md 或 docs/",
-    "type": "harness_knowledge_init"
-  },
-  {
-    "id": 11,
-    "prompt": "导入一段 Codex harness session summary：本轮重构了认证模块，决策是 token 放 httpOnly cookie，下一步跑集成测试，相关文件 src/auth.py, tests/test_auth.py",
-    "expected": "使用 summary-capture -t '认证模块重构' -s '<summary>' --source codex-harness --decisions 'token 放 httpOnly cookie' -n '跑集成测试' --related 'src/auth.py,tests/test_auth.py'；写入 .moss-mem/summaries/ 并提示 mempalace mine .moss-mem/summaries/",
-    "type": "harness_summary_capture"
-  },
-  {
-    "id": 12,
-    "prompt": "我新增了一条 session summary，帮我刷新 moss-mem memory index 并说明 MemPalace 该怎么同步",
-    "expected": "运行 knowledge-index 生成 .moss-mem/index-cache/memory-index.md；随后运行 mempalace mine .moss-mem/ --wing <project>，或更精确地 mine .moss-mem/tasks/ 与 .moss-mem/summaries/ 让 MemPalace 同步 moss-mem 记忆",
-    "type": "harness_knowledge_index"
-  },
-  {
-    "id": 13,
-    "prompt": "检查 moss-mem memory layout 和 memory index 是否还是最新；如果我刚更新过任务或 summary，需要告诉我怎么修复",
-    "expected": "运行 python3 {base_dir}/scripts/memory_manager.py knowledge-check 验证 MEMORY.md、.moss-mem/tasks/、.moss-mem/tasks/MEMORY_ARCHIVE.md、.moss-mem/summaries/ 与 .moss-mem/index-cache/；若提示 .moss-mem/index-cache/memory-index.md stale，则运行 knowledge-index 后重跑 knowledge-check；不要把手改生成的 memory-index 当作 doctrine",
-    "type": "harness_knowledge_check"
-  },
-  {
-    "id": 13,
-    "prompt": "moss-mem 的记忆是怎么存的？MemPalace 和 .moss-mem 是什么关系？",
-    "expected": "清晰阐述三层架构：.moss-mem/ 是原始记忆存储（文件层）→ MemPalace 将文件索引化为可查询的记忆仓库（语义搜索、KG、日记）→ 日常读取优先走 MemPalace（语义搜索），回退到文件 grep。强调 MemPalace 不是可选插件，而是记忆仓库的核心查询引擎。",
-    "type": "architecture_philosophy"
-  },
-  {
-    "id": 14,
-    "prompt": "我想找之前做过的某个功能相关的工作，但记不清具体关键词了，怎么办？",
-    "expected": "引导用户走 MemPalace CLI semantic search（`mempalace search \"大致描述\" --wing <project>`），用语义向量 + BM25 hybrid 找；fallback 走 grep。CLI 不可达时直接 grep MEMORY.md + .moss-mem/",
-    "type": "fuzzy_search_guidance"
-  },
-  {
-    "id": 15,
-    "prompt": "我已经在这项目上做了 60 多个 task 了，.moss-mem/tasks/ 目录里塞满了 md 文件，搜东西越来越慢。帮我压缩一下记忆，把老的 task 归档",
-    "expected": "调用 python3 {base}/scripts/memory_manager.py state compact --strategy archive-summary（或 /moss-mem compact）；扫描 .moss-mem/tasks/，把老 task 移到 .moss-mem/archive/YYYY/，每个 task 保留首段摘要+key_decisions+landmines，更新 MEMORY.md 的归档索引。打印压缩前/后 task 数量、节省 token、保留率",
-    "type": "compaction_manual",
-    "eval_focus": "新增功能——检查 moss-mem 是否真的实现了 compaction 命令"
-  },
-  {
-    "id": 16,
-    "prompt": "刚完成一个 task，发现 .moss-mem/tasks/ 已经积累了 50+ 文件，该不该自动触发压缩？",
-    "expected": "在 state commit / complete 后检测 task 数量，超过阈值（默认 30，可配置 --threshold N）时 🛑 STOP 提示用户：检测到 N 个历史 task（远超阈值 T），是否执行 compaction？展示建议保留最近 K 个 + 压缩比估算。让用户确认后才执行；不强制自动跑",
-    "type": "compaction_auto_trigger",
-    "eval_focus": "检查 moss-mem 是否实现了阈值自动检测 + 用户确认的检查点"
-  },
-  {
-    "id": 17,
-    "prompt": "压缩了记忆后，怎么验证我没丢重要信息？给我一个 3 步验证清单",
-    "expected": "输出结构化清单：1) state knowledge-check --strict 确认归档目录结构；2) mempalace search 抽查 3 个历史 task 关键词能搜到（或 grep -r 兜底）；3) state show 当前 task 仍然完整 + 随机 cat 一个 archive 摘要确认 key_decisions 还在。每步有具体命令。出现 🔴 CHECKPOINT 标记关键决策点",
-    "type": "compaction_verification",
-    "eval_focus": "检查是否有结构化的 post-compact 验证流程 + 失败模式 fallback"
+    "prompt": "JSON 索引损坏后搜索 httpOnly cookie。",
+    "expected": "memory-search 自动重建一次；若重建失败则直接扫描 Markdown 并标记 [INDEX-FALLBACK]，交接功能不受阻。",
+    "type": "corrupt_index_recovery"
   }
 ]
