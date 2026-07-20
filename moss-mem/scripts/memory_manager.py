@@ -708,6 +708,7 @@ FIELD_WEIGHTS = {"title": 8, "Description": 5, "Summary": 5, "Decisions": 5, "Ke
 def _load_index_payload():
     with _open(Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE) as handle: return json.load(handle)
 def _index_problem(payload):
+    if not isinstance(payload, dict): return "schema mismatch"
     if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
     current, indexed = _current_source_metadata(), payload.get("sources", {})
     if set(current) != set(indexed): return "source set changed"

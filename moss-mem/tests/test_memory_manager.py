@@ -71,6 +71,16 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout); self.assertIn("Rebuilding local memory index", result.stdout)
         self.assertIn("20260720-auth.md", result.stdout); self.assertTrue(list(json_path.parent.glob("memory-index.json.bak.*"))); json.loads(json_path.read_text(encoding="utf-8"))
 
+    def test_memory_search_rebuilds_non_object_json_index(self):
+        self._write_index_fixture(); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        json_path = self.project / ".moss-mem/index-cache/memory-index.json"; json_path.write_text("[]", encoding="utf-8")
+        result = self.run_cli("memory-search", "httpOnly cookie")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Rebuilding local memory index: schema mismatch", result.stdout)
+        self.assertIn("20260720-auth.md", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertIsInstance(json.loads(json_path.read_text(encoding="utf-8")), dict)
+
     def test_memory_search_direct_scans_when_rebuild_fails(self):
         self._write_index_fixture(); spec = importlib.util.spec_from_file_location("memory_manager_under_test", SCRIPT)
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); previous = Path.cwd(); output = io.StringIO()
