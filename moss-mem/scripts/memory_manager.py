@@ -729,14 +729,24 @@ def _write_index_files(payload, warnings):
         for path, text in outputs.items():
             temp = path.with_suffix(path.suffix + ".tmp"); temp.write_text(text, encoding="utf-8"); temp_paths[path] = temp
         for path, temp in temp_paths.items(): os.replace(temp, path)
-    except OSError:
+    except OSError as original_error:
+        rollback_errors = []
         for path, content in previous.items():
             if content is None:
                 try: path.unlink()
                 except FileNotFoundError: pass
+                except OSError as exc: rollback_errors.append(exc)
             else:
-                restore = path.with_suffix(path.suffix + ".restore"); restore.write_bytes(content); os.replace(restore, path)
-        raise
+                restore = path.with_suffix(path.suffix + ".restore")
+                try:
+                    restore.write_bytes(content); os.replace(restore, path)
+                except OSError as exc:
+                    rollback_errors.append(exc)
+                    try: restore.unlink()
+                    except OSError: pass
+        if rollback_errors:
+            original_error.__context__ = rollback_errors[0]
+        raise original_error
     finally:
         for temp in temp_paths.values():
             try: temp.unlink()
