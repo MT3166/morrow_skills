@@ -63,6 +63,8 @@ class MemoryManagerCLITest(unittest.TestCase):
             os.chdir(previous)
         self.assertEqual(rebuild.call_count, 1)
         self.assertIn("[INDEX-FALLBACK]", output.getvalue())
+        self.assertIn("20260720-auth.md", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
 
     def test_memory_search_rebuilds_corrupt_json_index(self):
         self._write_index_fixture(); self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
