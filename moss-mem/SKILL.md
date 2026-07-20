@@ -52,14 +52,15 @@ python3 {base}/scripts/memory_manager.py memory-search "query" --limit 10
 ```
 
 The command ranks exact and token matches from `MEMORY.md`, active and archived
-task files, and summaries. If the index is missing, corrupt, or stale it emits
-`[INDEX-FALLBACK]`, searches source Markdown directly, and remains usable.
-Rebuild with `knowledge-index` after the operation; do not edit generated files.
+task files, and summaries. If the index is missing, corrupt, or stale it first
+attempts one `knowledge-index` rebuild. Only when rebuilding fails or the
+rebuilt index still cannot load does it emit `[INDEX-FALLBACK]` and search
+source Markdown directly. Do not edit generated files.
 `knowledge-check [--strict]` validates paths and index layout.
 
 ## State Operations
 
-`state set k=v ...` is the only mutating verb; aliases `start`, `update`,
+`state set k=v ...` is the only field-assignment verb; aliases `start`, `update`,
 `complete`, `show`, `add-note`, and `init` remain supported. Examples:
 
 ```bash
@@ -127,7 +128,7 @@ Step 3 is a checkpoint: show drafted decisions and landmines before writing.
 |---|---|
 | Missing `MEMORY.md` | Run `state init`, then commit a task. |
 | Stale `.edit_lock` | Run `recover`; if still stale, remove the lock with the platform command and validate. |
-| Search index missing/corrupt/stale | Continue with `[INDEX-FALLBACK]` source search, then run `knowledge-index`. |
+| Search index missing/corrupt/stale | Attempt one `knowledge-index` rebuild; only if it fails or the rebuilt index still cannot load, continue with `[INDEX-FALLBACK]` source search. |
 | Empty search | Widen the query and search source Markdown directly. |
 | Incomplete handoff fields | Run `state validate --fix`, then set remaining fields and validate. |
 | Strict layout check fails | Fix paths or rebuild with `knowledge-index`; record unresolved issues as landmines. |
@@ -163,7 +164,7 @@ python3 {base}/scripts/memory_manager.py knowledge-index
 | Operation | Unix (macOS / Linux / Git Bash) | Windows cmd | Windows PowerShell |
 |---|---|---|---|
 | Python | `python3 {base}/scripts/memory_manager.py …` | `python {base}\scripts\memory_manager.py …` | `python {base}\scripts\memory_manager.py …` |
-| Search text | `grep -r "query" .moss-mem/` | `findstr /s "query" .moss-mem\*` | `Select-String -Path ".moss-mem\*" -Pattern "query"` |
+| Search text | `python3 {base}/scripts/memory_manager.py memory-search "query"` | `python {base}\scripts\memory_manager.py memory-search "query"` | `python {base}\scripts\memory_manager.py memory-search "query"` |
 | Remove lock | `rm .moss-mem/tasks/.edit_lock` | `del .moss-mem\tasks\.edit_lock` | `Remove-Item .moss-mem\tasks\.edit_lock` |
 | Force-kill | `kill -9 <pid>` | `taskkill /F /PID <pid>` | `Stop-Process -Id <pid> -Force` |
 | List directory | `ls` | `dir` | `Get-ChildItem` |
