@@ -57,7 +57,7 @@ class MemoryManagerCLITest(unittest.TestCase):
         output = io.StringIO(); previous = Path.cwd()
         try:
             os.chdir(self.project)
-            with mock.patch.object(module, "_load_index_payload", side_effect=[FileNotFoundError, {"schema_version": 1, "sources": {}, "records": [], "inverted_terms": {}}]), mock.patch.object(module, "cmd_knowledge_index", return_value=True) as rebuild, mock.patch("sys.stdout", output):
+            with mock.patch.object(module, "_load_index_payload", side_effect=[FileNotFoundError, {"schema_version": 1, "sources": {}, "records": [], "inverted_terms": {}}]), mock.patch.object(module, "_index_problem", side_effect=OSError("source disappeared")), mock.patch.object(module, "cmd_knowledge_index", return_value=True) as rebuild, mock.patch("sys.stdout", output):
                 self.assertEqual(module.cmd_memory_search("httpOnly cookie"), 0)
         finally:
             os.chdir(previous)

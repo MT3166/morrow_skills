@@ -806,7 +806,12 @@ def cmd_memory_search(query, limit=10):
             try: payload = _load_index_payload()
             except (OSError, json.JSONDecodeError): payload = None
             else:
-                if _index_problem(payload):
+                try:
+                    problem = _index_problem(payload)
+                except OSError:
+                    payload = None
+                    problem = None
+                if problem:
                     payload = None
     if payload is None:
         safe_print("[INDEX-FALLBACK] scanning Markdown sources directly")

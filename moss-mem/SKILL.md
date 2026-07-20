@@ -74,15 +74,15 @@ python3 {base}/scripts/memory_manager.py state validate --fix
 
 Task record schema:
 
-| Field | Required | Default | Purpose |
-|---|---|---|---|
-| `current_task` | optional | `(待补)` | Current task description. |
-| `next_step` | optional | `等待下一步指令` | Next actionable handoff step. |
-| `status` | required | `🔧` | Task state; one of `🔧`, `✅`, or `❌`. |
-| `last_action` | optional | `<!-- pending -->` | Most recent completed action. |
-| `key_decisions` | optional list | `<!-- pending -->` | Decisions that constrain follow-up work. |
-| `landmines` | optional list | `<!-- none -->` | Risks, hazards, or unresolved constraints. |
-| `created` | auto | ISO timestamp | Task creation time. |
+| Field | Type | Required | Default | Purpose |
+|---|---|---|---|---|
+| `current_task` | string | optional | `(待补)` | Current task description. |
+| `next_step` | string | optional | `等待下一步指令` | Next actionable handoff step. |
+| `status` | enum | required | `🔧` | Task state: `🔧 In Progress`, `✅ Completed`, or `❌ Blocked`. |
+| `last_action` | string | optional | `<!-- pending -->` | Most recent completed action. |
+| `key_decisions` | list[string] | optional | `<!-- pending -->` | Decisions that constrain follow-up work. |
+| `landmines` | list[string] | optional | `<!-- none -->` | Risks, hazards, or unresolved constraints. |
+| `created` | ISO timestamp | auto | auto | Task creation time. |
 
 > **P9 trap:** `key_decisions`, `last_action`, or `landmines` set before the
 > first `state commit` for a task land in the scratchpad, not its task file.
