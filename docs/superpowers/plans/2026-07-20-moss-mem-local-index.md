@@ -11,6 +11,7 @@
 ## Global Constraints
 
 - No MemPalace, MCP, vector database, SQLite extension, external service, or third-party Python package.
+- Support the repository's default `python3` runtime: Python 3.9 or newer.
 - The source of truth remains `MEMORY.md`, `.moss-mem/tasks/**/*.md`, and `.moss-mem/summaries/**/*.md`.
 - `.moss-mem/index-cache/` is generated and may be deleted and rebuilt.
 - Use UTF-8 and atomic temporary-file replacement for generated indexes.
@@ -104,17 +105,17 @@ git add moss-mem/test-prompts.json
 git commit -m "test(moss-mem): focus evaluation on local index"
 ```
 
-### Task 2: Restore Cross-Platform Lock Acquisition
+### Task 2: Restore Python 3.9 Loading And Cross-Platform Lock Acquisition
 
 **Files:**
 - Create: `moss-mem/tests/test_memory_manager.py`
-- Modify: `moss-mem/scripts/memory_manager.py:146-160`
+- Modify: `moss-mem/scripts/memory_manager.py:1-17,146-160`
 
 **Interfaces:**
 - Consumes: existing CLI `state set key=value`.
-- Produces: `run_cli(*args: str) -> subprocess.CompletedProcess[str]` test helper and working `acquire_lock() -> bool`.
+- Produces: Python 3.9-compatible annotation loading, `run_cli(*args: str) -> subprocess.CompletedProcess[str]` test helper, and working `acquire_lock() -> bool`.
 
-- [ ] **Step 1: Write the failing command-level test**
+- [ ] **Step 1: Write the failing Python 3.9 load test**
 
 Create `moss-mem/tests/test_memory_manager.py` with:
 
@@ -150,6 +151,38 @@ class MemoryManagerCLITest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_cli_help_loads_on_python39(self):
+        result = self.run_cli("--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("MOSS_MEM", result.stdout)
+```
+
+- [ ] **Step 2: Run the load test and verify RED**
+
+Run: `python3 -m unittest moss-mem/tests/test_memory_manager.py -v`
+
+Expected: FAIL on Python 3.9 with `unsupported operand type(s) for |: 'type' and 'NoneType'` at `_touch_gitkeep`.
+
+- [ ] **Step 3: Defer annotation evaluation**
+
+Add this immediately after the module docstring and before other imports:
+
+```python
+from __future__ import annotations
+```
+
+- [ ] **Step 4: Verify the load test is GREEN**
+
+Run: `python3 -m unittest moss-mem/tests/test_memory_manager.py -v`
+
+Expected: `test_cli_help_loads_on_python39 ... ok`.
+
+- [ ] **Step 5: Add the failing lock test**
+
+Add this method to `MemoryManagerCLITest`:
+
+```python
     def test_state_set_acquires_lock_and_updates_memory(self):
         result = self.run_cli(
             "state",
@@ -166,13 +199,13 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertFalse((self.project / ".moss-mem/tasks/.edit_lock").exists())
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [ ] **Step 6: Run the lock test and verify RED**
 
 Run: `python3 -m unittest moss-mem/tests/test_memory_manager.py -v`
 
 Expected: FAIL because output contains `module 'os' has no attribute '_open'` and return code is non-zero.
 
-- [ ] **Step 3: Apply the one-line production fix**
+- [ ] **Step 7: Apply the one-line production fix**
 
 In `acquire_lock`, replace:
 
@@ -186,17 +219,17 @@ with:
 fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
 ```
 
-- [ ] **Step 4: Verify GREEN**
+- [ ] **Step 8: Verify both tests are GREEN**
 
 Run: `python3 -m unittest moss-mem/tests/test_memory_manager.py -v`
 
-Expected: `test_state_set_acquires_lock_and_updates_memory ... ok`.
+Expected: both `test_cli_help_loads_on_python39` and `test_state_set_acquires_lock_and_updates_memory` are `ok`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add moss-mem/tests/test_memory_manager.py moss-mem/scripts/memory_manager.py
-git commit -m "fix(moss-mem): restore atomic lock creation"
+git commit -m "fix(moss-mem): restore Python 3.9 CLI compatibility"
 ```
 
 ### Task 3: Build Structured JSON And Markdown Indexes
