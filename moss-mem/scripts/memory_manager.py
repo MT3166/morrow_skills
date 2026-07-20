@@ -435,7 +435,7 @@ def check_compact_threshold(threshold: int = 30, source: str = "commit"):
 
     Never blocks the calling command — compaction must always be an explicit,
     user-confirmed action via `state compact`. The nudge exists so the user
-    notices growth before it starts hurting grep/mempalace latency.
+    notices growth before it starts hurting local index/search latency.
     """
     tasks_root = Path(TASKS_DIR)
     if not tasks_root.exists():
@@ -843,18 +843,24 @@ def cmd_knowledge_check(strict: bool = False):
     if agents_path.exists():
         safe_print("ℹ️  AGENTS.md found; moss-mem treats it as read-only external context")
 
-    index_path = Path(INDEX_CACHE_DIR) / "memory-index.md"
-    sources = []
-    for root in [Path(TASKS_DIR), Path(SUMMARIES_DIR)]:
-        if root.exists():
-            sources.extend(p for p in root.rglob("*.md") if p.is_file())
-    if index_path.exists() and sources:
-        index_mtime = index_path.stat().st_mtime_ns
-        newer = [p for p in sources if p.stat().st_mtime_ns > index_mtime]
-        if newer:
-            warnings.append(f"memory index is stale; newer source: {max(newer, key=lambda p: p.stat().st_mtime_ns)}")
-        else:
-            safe_print("✅ memory index is fresh")
+    json_index = Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE
+    markdown_index = Path(INDEX_CACHE_DIR) / INDEX_MD_FILE
+    if not json_index.is_file():
+        warnings.append(f"missing index: {json_index}")
+    if not markdown_index.is_file():
+        warnings.append(f"missing index: {markdown_index}")
+    if json_index.is_file():
+        try:
+            payload = _load_index_payload()
+            problem = _index_problem(payload)
+            if problem:
+                warnings.append(f"memory index is stale: {problem}")
+            else:
+                safe_print("✅ memory index is fresh")
+        except json.JSONDecodeError:
+            warnings.append(f"memory index is corrupt: {json_index}")
+        except OSError as exc:
+            warnings.append(f"memory index is unreadable: {exc}")
 
     if warnings:
         safe_print("\n⚠️  Warnings:")
@@ -931,13 +937,11 @@ def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decis
         "## Related Files",
         *related_lines,
         "",
-        "## MemPalace Sync",
-        f"Run: `mempalace mine .moss-mem/summaries/ --mode convos --extract general --wing <project>`",
         "",
     ])
-    summary_path.write_text(content)
+    summary_path.write_text(content, encoding="utf-8")
     safe_print(f"✅ Harness summary captured: {summary_path}")
-    safe_print("🔎 Next: mine `.moss-mem/summaries/` into MemPalace before handoff if MCP/CLI is available.")
+    safe_print("🔎 Next: run knowledge-index before handoff.")
 
 def _git_diff_summary():
     """Get summary of uncommitted changes."""
@@ -1326,7 +1330,7 @@ def cmd_compact(
     safe_print(f"   Est. tokens saved: ~{saved_tokens}")
     if not dry_run:
         safe_print(f"   Archive location: {archive_dir}")
-        safe_print(f"   Next: run `mempalace mine {archive_dir} --wing <project>` to re-index")
+        safe_print("   Next: run knowledge-index to refresh local search")
     return 0
 
 

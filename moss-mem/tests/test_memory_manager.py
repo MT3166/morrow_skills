@@ -202,6 +202,42 @@ class MemoryManagerCLITest(unittest.TestCase):
         result = self.run_cli("knowledge-index")
         self.assertNotEqual(result.returncode, 0)
 
+    def test_knowledge_check_strict_fails_when_index_is_stale(self):
+        self._write_index_fixture()
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        task = self.project / ".moss-mem/tasks/20260720-100000_task.md"
+        task.write_text(task.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+        result = self.run_cli("knowledge-check", "--strict")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("memory index is stale", result.stdout)
+
+    def test_summary_capture_recommends_local_reindex_only(self):
+        result = self.run_cli(
+            "summary-capture", "-t", "auth", "-s", "cookie decision",
+            "--decisions", "httpOnly cookie", "-n", "run tests",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("knowledge-index", result.stdout)
+        removed_name = "mem" + "palace"
+        self.assertNotIn(removed_name, result.stdout.lower())
+        summary = next((self.project / ".moss-mem/summaries").glob("*.md"))
+        self.assertNotIn(removed_name, summary.read_text(encoding="utf-8").lower())
+
+    def test_compaction_recommends_local_reindex_only(self):
+        tasks = self.project / ".moss-mem/tasks"
+        tasks.mkdir(parents=True)
+        for index in range(3):
+            (tasks / f"20260720-10000{index}_task.md").write_text(
+                f"# Task {index}\n\n## Description\nTask {index}\n",
+                encoding="utf-8",
+            )
+
+        result = self.run_cli("state", "compact", "--keep-recent", "1", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("knowledge-index", result.stdout)
+        removed_name = "mem" + "palace"
+        self.assertNotIn(removed_name, result.stdout.lower())
+
     def test_second_replace_failure_restores_json_and_markdown(self):
         cache = self.project / ".moss-mem/index-cache"
         cache.mkdir(parents=True)
