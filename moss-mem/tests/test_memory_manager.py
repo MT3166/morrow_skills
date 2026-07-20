@@ -211,6 +211,31 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("memory index is stale", result.stdout)
 
+    def test_knowledge_check_reports_malformed_sources_schema(self):
+        self._write_index_fixture()
+        (self.project / ".moss-mem/tasks/MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8")
+        cache = self.project / ".moss-mem/index-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "memory-index.md").write_text("# Memory Index\n", encoding="utf-8")
+        for sources in (None, []):
+            with self.subTest(sources=sources):
+                payload = {
+                    "schema_version": 1,
+                    "generated_at": "now",
+                    "sources": sources,
+                    "records": [],
+                    "inverted_terms": {},
+                }
+                (cache / "memory-index.json").write_text(json.dumps(payload), encoding="utf-8")
+                result = self.run_cli("knowledge-check")
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn("memory index is stale: schema mismatch", result.stdout)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                strict = self.run_cli("knowledge-check", "--strict")
+                self.assertEqual(strict.returncode, 1, strict.stderr + strict.stdout)
+                self.assertIn("memory index is stale: schema mismatch", strict.stdout)
+                self.assertNotIn("Traceback", strict.stdout + strict.stderr)
+
     def test_summary_capture_recommends_local_reindex_only(self):
         result = self.run_cli(
             "summary-capture", "-t", "auth", "-s", "cookie decision",

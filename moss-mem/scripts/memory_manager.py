@@ -710,7 +710,9 @@ def _load_index_payload():
 def _index_problem(payload):
     if not isinstance(payload, dict): return "schema mismatch"
     if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
-    current, indexed = _current_source_metadata(), payload.get("sources", {})
+    indexed = payload.get("sources")
+    if not isinstance(indexed, dict): return "schema mismatch"
+    current = _current_source_metadata()
     if set(current) != set(indexed): return "source set changed"
     if any(current[p] != indexed[p] for p in current): return "source modified"
     return None
