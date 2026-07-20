@@ -128,7 +128,7 @@ Use these four gated steps at session end:
 4. Run `state set status="✅" current_task="<handoff summary>"` once. This
    completes and archives the current task; do not run `state commit` after it.
    Verify `MEMORY.md` reports `✅ Completed` and that an archive file appears in
-   `.moss-mem/tasks/archive/` (with a completion record in `ARCHIVE.md`). Start
+   `.moss-mem/tasks/archive/` (with a completion record in `.moss-mem/tasks/MEMORY_ARCHIVE.md`). Start
    a new task with a separate `state commit` only after this handoff is
    complete.
 
