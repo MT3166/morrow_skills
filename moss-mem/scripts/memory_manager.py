@@ -720,7 +720,7 @@ def _index_problem(payload):
     ids = set()
     required = {"id", "path", "kind", "title", "created", "mtime_ns", "sections", "preview"}
     for record in records:
-        if not isinstance(record, dict) or set(record) < required: return "schema mismatch"
+        if not isinstance(record, dict) or not required.issubset(record): return "schema mismatch"
         if (not isinstance(record["id"], int) or isinstance(record["id"], bool) or record["id"] < 0 or record["id"] in ids
                 or not isinstance(record["path"], str) or not isinstance(record["kind"], str) or record["kind"] not in allowed
                 or not isinstance(record["title"], str) or not isinstance(record["created"], str)

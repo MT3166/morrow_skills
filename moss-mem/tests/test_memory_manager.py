@@ -244,6 +244,7 @@ class MemoryManagerCLITest(unittest.TestCase):
         for value in (None,):
             p = json.loads(json.dumps(valid)); p["records"] = value; cases.append(p)
         p = json.loads(json.dumps(valid)); del p["records"][0]["title"]; cases.append(p)
+        p = json.loads(json.dumps(valid)); del p["records"][0]["title"]; p["records"][0]["extra"] = "x"; cases.append(p)
         p = json.loads(json.dumps(valid)); p["inverted_terms"] = []; cases.append(p)
         p = json.loads(json.dumps(valid)); p["inverted_terms"] = {"ghost": [999999]}; cases.append(p)
         for payload in cases:
