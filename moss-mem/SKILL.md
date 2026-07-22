@@ -156,15 +156,18 @@ mode rather than blocking state writes.
 
 ## Anti-Patterns / Blacklist
 
-- Treat generated index files as authoritative or hand-edit them.
-- Store state outside `MEMORY.md` and `.moss-mem/`.
-- Modify project-owned `AGENTS.md`, docs, or harness session files.
-- Skip validation gates or silently compact without confirmation.
-- Block state writes because search/index validation failed; use fallback mode.
-- Set handoff fields before the first task commit (the P9 trap).
-- Chain `state set status="✅"` with `state commit -m "…"` for handoff —
-  complete archives the task; commit starts a new one. Verify via `MEMORY.md`
-  status + `.moss-mem/tasks/archive/` listing (there is no `state show --archived`).
+| Anti-pattern | Required alternative |
+|---|---|
+| Hand-edit or treat `.moss-mem/index-cache/*` as source of truth | Rebuild with `knowledge-index`; only `MEMORY.md` / tasks / summaries are authoritative |
+| Call external memory services (e.g. mempalace, vector DBs, MCP memory servers) for moss-mem search | Use `memory-search` / local Markdown only — this skill is stdlib + files |
+| Store moss-mem state outside `MEMORY.md` and `.moss-mem/` | Keep all task / summary / archive / lock / index under those paths |
+| Create or rewrite project `AGENTS.md`, `docs/`, or `.harness/sessions/*` as part of moss-mem | Read external docs only if present; harness owns `.harness/` |
+| Skip `state validate` gates or silently compact without 🛑 / `--yes` | Always validate before complete; compact only after explicit confirm |
+| Block `state set` / handoff writes because index/search failed | Finish state change in file-only mode; rebuild index later |
+| Set `key_decisions` / `last_action` / `landmines` before the first `state commit` for a task (P9) | `state commit -m "…"` first, then set handoff fields, verify with `state show` |
+| Chain `state set status="✅"` with `state commit -m "…"` for handoff | Complete archives; commit starts a **new** task. Verify via `MEMORY.md` + `.moss-mem/tasks/archive/` (no `state show --archived`) |
+| Treat threshold nudge after commit/complete as auto-compact permission | Nudge is 🛑 only; user must run `state compact` explicitly |
+| Hand-write files under `.moss-mem/tasks/archive/` | Archive tree is owned by `state compact` / complete; restore by copying back to `tasks/` if needed |
 
 ## File Formats
 
