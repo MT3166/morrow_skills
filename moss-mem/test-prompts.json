@@ -2,19 +2,37 @@
   {
     "id": 1,
     "prompt": "项目环境只有 Python 标准库。初始化记忆、创建任务和 session summary 后，生成本地索引。",
-    "expected": "生成 .moss-mem/index-cache/memory-index.json 和 memory-index.md；两者包含任务与 summary，过程不安装或调用外部记忆服务。",
+    "expected": "state init（或 auto-init）+ state set/commit + summary-capture；再 knowledge-index，生成 .moss-mem/index-cache/memory-index.json 与 memory-index.md；不安装/调用 mempalace 或其它外部记忆服务。",
     "type": "local_index_generation"
   },
   {
     "id": 2,
     "prompt": "搜索 token refresh race；它只存在于归档任务的 Key Decisions 中。",
-    "expected": "memory-search 返回该归档任务且排名第一，输出 score、kind、path、title 和命中摘要。",
+    "expected": "python3 {base}/scripts/memory_manager.py memory-search \"token refresh race\" --limit 10；返回该归档任务且排名靠前，输出 score/kind/path/title/命中摘要。",
     "type": "ranked_archive_search"
   },
   {
     "id": 3,
     "prompt": "JSON 索引损坏后搜索 httpOnly cookie。",
-    "expected": "memory-search 自动重建一次；若重建失败则直接扫描 Markdown 并标记 [INDEX-FALLBACK]，交接功能不受阻。",
+    "expected": "memory-search 先尝试一次 knowledge-index 重建；若仍失败则扫描源 Markdown 并标记 [INDEX-FALLBACK]；交接/写状态不阻塞。",
     "type": "corrupt_index_recovery"
+  },
+  {
+    "id": 4,
+    "prompt": "开始任务：修复登录，下一步检查 auth.py；中途记一条 refresh race 笔记，然后提交快照。",
+    "expected": "state set current_task=\"修复登录\" next_step=\"检查 auth.py\" status=\"🔧\" → state note \"refresh race\" → state commit -m \"…\"。不要求单独 state init（auto-init）。",
+    "type": "state_lifecycle"
+  },
+  {
+    "id": 5,
+    "prompt": "现在要交接给下一个 Agent，请完成交接流程。",
+    "expected": "state validate → (fail) validate --fix → 🔴 CHECKPOINT 起草 last_action/key_decisions/landmines 后 state set → 🛑 确认后 state set status=\"✅\"（或 complete -d）。禁止 complete 后再 state commit。验证 MEMORY.md ✅ + .moss-mem/tasks/archive/。",
+    "type": "handoff_protocol"
+  },
+  {
+    "id": 6,
+    "prompt": "tasks 目录已有 50+ 文件，帮我压缩记忆，并说明怎么验证没丢关键决策。",
+    "expected": "state compact --dry-run 预览 → 🛑 STOP 确认 → state compact --strategy archive-summary --keep-recent 10 --yes（若非交互）。归档到 .moss-mem/tasks/archive/。验证：knowledge-check --strict + memory-search 抽查 + state show；🔴 丢词则 archive-full。",
+    "type": "compaction_and_verify"
   }
 ]

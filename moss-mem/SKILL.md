@@ -139,15 +139,20 @@ Use these four gated steps at session end:
 
 ## If-Then Fallbacks
 
-| Trigger | Response |
-|---|---|
-| Missing `MEMORY.md` | Run `state init`, then commit a task. |
-| Stale `.edit_lock` | Run `recover`; if still stale, remove the lock with the platform command and validate. |
-| Search index missing/corrupt/stale | Attempt one `knowledge-index` rebuild; only if it fails or the rebuilt index still cannot load, continue with `[INDEX-FALLBACK]` source search. |
-| Empty search | Widen the query and rerun `memory-search`; direct source Markdown scanning is performed only internally by the command in `[INDEX-FALLBACK]` mode. |
-| Incomplete handoff fields | Run `state validate --fix`, then set remaining fields and validate. |
-| Strict layout check fails | Fix paths or rebuild with `knowledge-index`; record unresolved issues as landmines. |
-| Compact write fails | Source file remains in place; fix disk/permissions and rerun. |
+Use this table after a failed gate. Apply the first response once; if the same
+trigger remains, take the fallback and continue in file-only / index-fallback
+mode rather than blocking state writes.
+
+| Trigger | First response | Fallback if still failing |
+|---|---|---|
+| Missing `MEMORY.md` | `state init` (or first `state set` / `state commit` — both auto-init) | Create `MEMORY.md` pointer manually after `state commit -m "…"`, then `state show` |
+| Stale `.edit_lock` after crash | `python3 {base}/scripts/memory_manager.py recover` | Remove `.moss-mem/tasks/.edit_lock` with the platform command, then `state validate --fix` |
+| Search index missing / corrupt / stale | One `knowledge-index` rebuild, then retry `memory-search` | Continue with `[INDEX-FALLBACK]` source Markdown scan; mark active task `[INDEX-STALE]`; do not block handoff writes |
+| Empty search results | Widen query tokens / raise `--limit`, rerun `memory-search` | `knowledge-index` then search again; if still empty, note "no hit" and proceed with `state show` context only |
+| Incomplete handoff fields | `state validate --fix` | Set remaining `last_action` / `key_decisions` / `landmines` via `state set`, then `state validate` |
+| Strict layout check fails | Fix missing paths or run `knowledge-index` | Non-strict `knowledge-check`; record layout issues as a task landmine; continue |
+| Compact write fails (disk / permission) | Abort further moves — source task files stay in place | 🛑 STOP, free disk / fix permissions, re-run the same `state compact` args |
+| Key term missing after compact | 🔴 CHECKPOINT — stop using archive-summary for that set | Re-run with `--strategy archive-full`, then `knowledge-index` + `memory-search` spot-check |
 
 ## Anti-Patterns / Blacklist
 
