@@ -111,11 +111,12 @@ python3 {base}/scripts/memory_manager.py state compact --strategy archive-summar
 ```
 
 `archive-summary` keeps Description, Next Step, Key Decisions, and Landmines;
-`archive-full` preserves the complete body. The command normally shows a STOP
-confirmation; `--yes` is required for non-interactive runs. After moving more
-than five tasks, run `knowledge-check --strict`, search three historical terms
-with `memory-search`, rebuild the index, and run `state show` to confirm the
-active pointer. If a key term disappears, stop and rerun with `archive-full`.
+`archive-full` preserves the complete body. The command normally shows a
+🛑 STOP confirmation; `--yes` is required for non-interactive runs. After
+moving more than five tasks, run `knowledge-check --strict`, search three
+historical terms with `memory-search`, rebuild the index, and run `state show`
+to confirm the active pointer. 🔴 CHECKPOINT: if a key term disappears, stop
+and rerun with `archive-full`.
 
 ## Handoff Protocol
 
@@ -123,16 +124,18 @@ Use these four gated steps at session end:
 
 1. Run `state validate`. Exit 0 proceeds to Step 4; exit 1 proceeds to Step 2.
 2. Run `state validate --fix`, then validate again. Exit 0 proceeds to Step 4.
-3. Set `last_action`, `key_decisions`, and `landmines`; run `state show` and
-   verify all three are filled, repeating as needed.
-4. Run `state set status="✅" current_task="<handoff summary>"` once. This
-   completes and archives the current task; do not run `state commit` after it.
-   Verify `MEMORY.md` reports `✅ Completed` and that an archive file appears in
-   `.moss-mem/tasks/archive/` (with a completion record in `.moss-mem/tasks/MEMORY_ARCHIVE.md`). Start
-   a new task with a separate `state commit` only after this handoff is
-   complete.
-
-Step 3 is a checkpoint: show drafted decisions and landmines before writing.
+3. 🔴 CHECKPOINT — draft `last_action`, `key_decisions`, and `landmines`, show
+   the user, then `state set` them; run `state show` and verify all three are
+   filled, repeating as needed.
+4. 🛑 STOP — confirm with the user, then run
+   `state set status="✅" current_task="<handoff summary>"` once (or legacy
+   `complete -d "<handoff summary>"`). This completes and archives the current
+   task; **do not** chain `state commit` after it (`status="✅"` maps to
+   complete/archive; `state commit` starts a **new** task file). Verify
+   `MEMORY.md` reports `✅ Completed` and that an archive file appears in
+   `.moss-mem/tasks/archive/` (with a completion record in
+   `.moss-mem/tasks/MEMORY_ARCHIVE.md`). Start a new task with a separate
+   `state commit` only after this handoff is complete.
 
 ## If-Then Fallbacks
 
@@ -154,6 +157,9 @@ Step 3 is a checkpoint: show drafted decisions and landmines before writing.
 - Skip validation gates or silently compact without confirmation.
 - Block state writes because search/index validation failed; use fallback mode.
 - Set handoff fields before the first task commit (the P9 trap).
+- Chain `state set status="✅"` with `state commit -m "…"` for handoff —
+  complete archives the task; commit starts a new one. Verify via `MEMORY.md`
+  status + `.moss-mem/tasks/archive/` listing (there is no `state show --archived`).
 
 ## File Formats
 
