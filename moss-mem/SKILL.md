@@ -1,6 +1,14 @@
 ---
 name: moss-mem
-description: Use when project work must persist across agent sessions, including starting or updating tasks, recovering context, searching prior work, capturing summaries, compacting history, validating handoffs, or completing a task.
+description: >-
+  Project memory across coding-agent sessions using only MEMORY.md + .moss-mem/
+  and a Python-stdlib local index (no external memory services). Use when the
+  user starts/updates/completes a task, asks "where am I", needs handoff,
+  searches prior work, captures a session summary, rebuilds the memory index,
+  runs memory-search, compacts task history, or validates handoff fields.
+  Triggers: start task, update task, complete task, handoff, where am I,
+  show memory, search memory, memory-search, knowledge-index, knowledge-check,
+  compact memory, add note, summary capture.
 version: "5.0.0"
 ---
 
