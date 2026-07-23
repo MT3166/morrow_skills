@@ -430,29 +430,91 @@ def cmd_complete(description: str):
         release_lock()
 
 
-def check_compact_threshold(threshold: int = 30, source: str = "commit"):
-    """Print a 🛑 STOP nudge when .moss-mem/tasks/ exceeds `threshold` task files.
+# Default growth thresholds for passive 🛑 STOP nudges (never auto-execute).
+ACTIVE_TASK_THRESHOLD = 30
+ARCHIVE_FILE_THRESHOLD = 50
+SUMMARY_FILE_THRESHOLD = 30
 
-    Never blocks the calling command — compaction must always be an explicit,
-    user-confirmed action via `state compact`. The nudge exists so the user
-    notices growth before it starts hurting local index/search latency.
-    """
+
+def _count_active_task_files() -> int:
     tasks_root = Path(TASKS_DIR)
     if not tasks_root.exists():
-        return
+        return 0
     count = 0
     for p in tasks_root.glob("*.md"):
         if p.name in _COMPACT_SKIP:
             continue
         count += 1
-    if count <= threshold:
+    return count
+
+
+def _iter_archive_md_files() -> list[Path]:
+    archive_root = Path(TASKS_DIR) / "archive"
+    if not archive_root.exists():
+        return []
+    files = [
+        p for p in archive_root.rglob("*.md")
+        if p.is_file() and p.name not in _COMPACT_SKIP and not p.name.endswith(".tmp")
+    ]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+
+def _iter_summary_md_files(*, include_digests: bool = False) -> list[Path]:
+    root = Path(SUMMARIES_DIR)
+    if not root.exists():
+        return []
+    files = []
+    for p in root.glob("*.md"):
+        if not p.is_file() or p.name in _COMPACT_SKIP or p.name.endswith(".tmp"):
+            continue
+        if not include_digests and p.name.startswith("digest-"):
+            continue
+        files.append(p)
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+
+def check_compact_threshold(
+    threshold: int = ACTIVE_TASK_THRESHOLD,
+    source: str = "commit",
+    archive_threshold: int = ARCHIVE_FILE_THRESHOLD,
+    summary_threshold: int = SUMMARY_FILE_THRESHOLD,
+):
+    """Print 🛑 STOP nudges when memory MD layers exceed growth thresholds.
+
+    Layers checked:
+      - active `.moss-mem/tasks/*.md`  (default >30)
+      - archive tree under tasks/archive/  (default >50)
+      - individual summaries (non-digest) under summaries/  (default >30)
+
+    Never blocks the calling command — compaction must always be an explicit,
+    user-confirmed action via `state compact --scope …`. The nudge exists so
+    long-running projects notice MD growth before search latency degrades.
+    """
+    active = _count_active_task_files()
+    archive_count = len(_iter_archive_md_files())
+    summary_count = len(_iter_summary_md_files(include_digests=False))
+
+    hits: list[tuple[str, int, int, str]] = []
+    if active > threshold:
+        hits.append(("tasks", active, threshold, "state compact --scope tasks --dry-run"))
+    if archive_count > archive_threshold:
+        hits.append(("archive", archive_count, archive_threshold, "state compact --scope archive --dry-run"))
+    if summary_count > summary_threshold:
+        hits.append(("summaries", summary_count, summary_threshold, "state compact --scope summaries --dry-run"))
+    if not hits:
         return
+
     safe_print("")
-    safe_print(f"🛑 STOP — .moss-mem/tasks/ has {count} task files (>{threshold} threshold).")
-    safe_print(f"   Search latency may degrade. Consider running:")
-    safe_print(f"     python3 {{base}}/scripts/memory_manager.py state compact --dry-run")
-    safe_print(f"   Re-run with `--keep-recent N` to tune how many tasks to retain.")
-    safe_print(f"   (Triggered after: {source}. Compaction is never automatic.)")
+    safe_print("🛑 STOP — moss-mem Markdown growth thresholds exceeded:")
+    for scope_name, count, limit, cmd in hits:
+        safe_print(f"   • {scope_name}: {count} file(s) (>{limit})")
+        safe_print(f"     python3 {{base}}/scripts/memory_manager.py {cmd}")
+    if len(hits) > 1:
+        safe_print("   Or compact every hot layer:")
+        safe_print("     python3 {base}/scripts/memory_manager.py state compact --scope all --dry-run")
+    safe_print(f"   (Triggered after: {source}. Compaction is never automatic; nudge ≠ permission to delete.)")
 
 
 def cmd_add_note(note: str):
@@ -990,6 +1052,8 @@ def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decis
     summary_path.write_text(content, encoding="utf-8")
     safe_print(f"✅ Harness summary captured: {summary_path}")
     safe_print("🔎 Next: run knowledge-index before handoff.")
+    # Passive growth nudge for summaries/archive/tasks — never auto-compacts.
+    check_compact_threshold(source="summary-capture")
 
 def _git_diff_summary():
     """Get summary of uncommitted changes."""
@@ -1233,91 +1297,97 @@ def _extract_task_sections(content: str) -> dict:
     return sections
 
 
-def cmd_compact(
-    strategy: str = "archive-summary",
-    keep_recent: int = 10,
-    threshold: int = 30,
-    dry_run: bool = False,
-    yes: bool = False,
-) -> int:
-    """Compact .moss-mem/tasks/ by archiving old task files.
+def _summarize_task_body(content: str, src_name: str) -> str:
+    """Keep high-signal task sections for archive-summary strategy."""
+    sections = _extract_task_sections(content)
+    keep_keys = ("Description", "Next Step", "Key Decisions", "Landmines")
+    kept = {
+        k: sections.get(k, "")
+        for k in keep_keys
+        if sections.get(k) and sections.get(k) not in ("<!-- pending -->", "<!-- none -->")
+    }
+    new_body = "\n\n".join(f"## {k}\n{v}" for k, v in kept.items())
+    if not new_body.strip():
+        first_line = content.splitlines()[0] if content.splitlines() else src_name
+        new_body = f"## Description\n{first_line}"
+    return (
+        f"# Compacted from {src_name}\n"
+        f"_Archived at {datetime.now().isoformat(timespec='seconds')}_\n\n"
+        f"{new_body}\n"
+    )
 
-    Strategies:
-      - archive-summary: move old tasks to .moss-mem/tasks/archive/YYYY/<ts>_<name>.md
-        and rewrite each with only Description + Next Step + Key Decisions + Landmines.
-      - archive-full: same move, but keep the full original body. (Default if strategy unknown.)
 
-    Trigger logic:
-      - Always runs when called manually (compact / state compact).
-      - Auto-suggested (via 🛑 STOP prompt) when task count > threshold.
-        Auto-execution is never silent — the agent must call `state compact` explicitly.
+def _atomic_write_text(dest: Path, body: str) -> None:
+    """Atomic write via temp file + replace; cleans temp on failure."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, dest)
+    except OSError:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
 
-    Returns exit code 0 on success, 1 on validation error, 2 on user abort.
+
+def _confirm_compact(yes: bool, dry_run: bool) -> int | None:
+    """Return None to proceed, 2 if user aborts. dry_run never prompts."""
+    if dry_run or yes:
+        return None
+    safe_print("")
+    safe_print("🛑 STOP — confirm to proceed. Re-run with --yes to skip this prompt.")
+    try:
+        answer = input("   Type 'yes' to compact, anything else to abort: ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer != "yes":
+        safe_print("❌ Aborted. No files moved.")
+        return 2
+    return None
+
+
+def _compact_active_tasks(
+    strategy: str,
+    keep_recent: int,
+    dry_run: bool,
+) -> tuple[int, int, int]:
+    """Archive old active task files. Returns (exit_code, moved, saved_bytes).
+
+    exit_code 0 = ok (including nothing-to-do), 1 = hard failure mid-move.
+    Caller handles confirmation.
     """
-    ensure_tasks_dir()
-    if strategy not in ("archive-summary", "archive-full"):
-        safe_print(f"❌ Unknown strategy: {strategy}. Use 'archive-summary' or 'archive-full'.")
-        return 1
-    if keep_recent < 1:
-        safe_print(f"❌ keep_recent must be >= 1 (got {keep_recent}).")
-        return 1
-    if threshold < 1:
-        safe_print(f"❌ threshold must be >= 1 (got {threshold}).")
-        return 1
-
     tasks_root = Path(TASKS_DIR)
     if not tasks_root.exists():
         safe_print(f"⚠️  {TASKS_DIR}/ does not exist. Run `state init` first.")
-        return 1
+        return 1, 0, 0
 
-    # Collect real task files (skip archive index, gitkeep, edit_lock, and any archive/ subdir)
     candidates: list[Path] = []
     for p in tasks_root.glob("*.md"):
         if p.name in _COMPACT_SKIP:
             continue
         candidates.append(p)
-    # Also include tasks in archive/ if they are date-stamped files (compacted-archive case)
-    # — but we never re-compact those. Skip them.
-
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)  # newest first
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     total = len(candidates)
     if total <= keep_recent:
         safe_print(
-            f"ℹ️  {total} task(s) found, <= keep_recent={keep_recent}. Nothing to compact."
+            f"ℹ️  [tasks] {total} task(s) found, <= keep_recent={keep_recent}. Nothing to compact."
         )
-        return 0
+        return 0, 0, 0
 
     to_archive = candidates[keep_recent:]
     year = datetime.now().strftime("%Y")
     archive_dir = tasks_root / "archive" / year
-    if not dry_run:
-        archive_dir.mkdir(parents=True, exist_ok=True)
-
-    # Estimate token savings by measuring bytes (rough: 1 token ≈ 4 bytes for English/CJK mix)
-    orig_bytes = 0
-    for p in to_archive:
-        orig_bytes += p.stat().st_size
-    est_tokens_before = orig_bytes // 4
-
-    safe_print(f"📊 Compaction plan ({'DRY-RUN' if dry_run else 'LIVE'}):")
+    orig_bytes = sum(p.stat().st_size for p in to_archive)
+    safe_print(f"📊 [tasks] plan ({'DRY-RUN' if dry_run else 'LIVE'}):")
     safe_print(f"   Total tasks:     {total}")
     safe_print(f"   Keep recent:     {keep_recent}")
     safe_print(f"   To archive:      {len(to_archive)}")
     safe_print(f"   Strategy:        {strategy}")
     safe_print(f"   Archive target:  {archive_dir}")
-    safe_print(f"   Est. tokens before: {est_tokens_before}")
-    if not dry_run:
-        # 🛑 STOP gate — even in non-interactive runs, the user can --yes to skip.
-        if not yes and not dry_run:
-            safe_print("")
-            safe_print("🛑 STOP — confirm to proceed. Re-run with --yes to skip this prompt.")
-            try:
-                answer = input("   Type 'yes' to archive, anything else to abort: ").strip().lower()
-            except EOFError:
-                answer = ""
-            if answer != "yes":
-                safe_print("❌ Aborted. No files moved.")
-                return 2
+    safe_print(f"   Est. tokens before: {orig_bytes // 4}")
 
     moved = 0
     saved_bytes = 0
@@ -1327,58 +1397,317 @@ def cmd_compact(
         except OSError as e:
             safe_print(f"⚠️  Cannot read {src.name}: {e}. Skipping.")
             continue
-
-        if strategy == "archive-summary":
-            sections = _extract_task_sections(content)
-            keep_keys = ("Description", "Next Step", "Key Decisions", "Landmines")
-            kept = {k: sections.get(k, "") for k in keep_keys}
-            # Drop empty sections
-            kept = {k: v for k, v in kept.items() if v and v != "<!-- pending -->" and v != "<!-- none -->"}
-            new_body = "\n\n".join(f"## {k}\n{v}" for k, v in kept.items())
-            if not new_body.strip():
-                # If a task has no high-signal sections, keep a header so the
-                # archive file isn't empty and grep still finds it.
-                first_line = content.splitlines()[0] if content.splitlines() else src.stem
-                new_body = f"## Description\n{first_line}"
-            new_body = (
-                f"# Compacted from {src.name}\n"
-                f"_Archived at {datetime.now().isoformat(timespec='seconds')}_\n\n"
-                f"{new_body}\n"
-            )
-        else:  # archive-full
-            new_body = content
-
+        new_body = (
+            _summarize_task_body(content, src.name)
+            if strategy == "archive-summary"
+            else content
+        )
         dest = archive_dir / f"{get_timestamp()}_{src.name}"
         if not dry_run:
-            # Atomic write: temp file + rename, so a crash mid-write doesn't
-            # leave a half-written archive file that looks like a real task.
-            tmp = dest.with_suffix(dest.suffix + ".tmp")
             try:
-                tmp.write_text(new_body, encoding="utf-8")
-                os.replace(tmp, dest)
+                _atomic_write_text(dest, new_body)
             except OSError as e:
-                if tmp.exists():
-                    try:
-                        tmp.unlink()
-                    except OSError:
-                        pass
                 safe_print(f"❌ Failed to write {dest}: {e}. Aborting further moves.")
-                return 1
+                return 1, moved, saved_bytes
             try:
                 src.unlink()
             except FileNotFoundError:
                 pass
-            saved_bytes += len(content) - len(new_body)
+            saved_bytes += max(0, len(content) - len(new_body))
         moved += 1
+    return 0, moved, saved_bytes
 
-    saved_tokens = max(0, saved_bytes // 4)
+
+def _compact_archive(
+    strategy: str,
+    keep_recent: int,
+    dry_run: bool,
+) -> tuple[int, int, int]:
+    """Secondary-compress older archive task bodies in place (or rewrite summary).
+
+    Newest `keep_recent` archive files are left untouched. Older ones are
+    rewritten with archive-summary (or left full under archive-full — then
+    nothing changes for those). Never deletes archive files.
+    """
+    files = _iter_archive_md_files()
+    total = len(files)
+    if total <= keep_recent:
+        safe_print(
+            f"ℹ️  [archive] {total} file(s), <= keep_recent={keep_recent}. Nothing to compact."
+        )
+        return 0, 0, 0
+
+    targets = files[keep_recent:]
+    # Skip files that already look summarized when using archive-summary.
+    work: list[Path] = []
+    for src in targets:
+        if strategy == "archive-full":
+            # archive-full on already-archived files is a no-op rewrite.
+            continue
+        try:
+            content = src.read_text(encoding="utf-8")
+        except OSError as e:
+            safe_print(f"⚠️  Cannot read {src}: {e}. Skipping.")
+            continue
+        # Heuristic: already compacted if header says Compacted and only keep-keys present.
+        if content.lstrip().startswith("# Compacted from") and "## Key Decisions" in content:
+            # Still allow re-run if body is huge (unsummarized noise after header).
+            if len(content) < 1500:
+                continue
+        work.append(src)
+
+    if not work:
+        safe_print(
+            f"ℹ️  [archive] {total} file(s); older set already summarized or strategy=archive-full. Nothing to do."
+        )
+        return 0, 0, 0
+
+    orig_bytes = sum(p.stat().st_size for p in work)
+    safe_print(f"📊 [archive] plan ({'DRY-RUN' if dry_run else 'LIVE'}):")
+    safe_print(f"   Total archive:   {total}")
+    safe_print(f"   Keep recent:     {keep_recent}")
+    safe_print(f"   To re-summarize: {len(work)}")
+    safe_print(f"   Strategy:        {strategy}")
+    safe_print(f"   Est. tokens before: {orig_bytes // 4}")
+
+    moved = 0
+    saved_bytes = 0
+    for src in work:
+        try:
+            content = src.read_text(encoding="utf-8")
+        except OSError as e:
+            safe_print(f"⚠️  Cannot read {src}: {e}. Skipping.")
+            continue
+        new_body = _summarize_task_body(content, src.name)
+        if not dry_run:
+            try:
+                _atomic_write_text(src, new_body)
+            except OSError as e:
+                safe_print(f"❌ Failed to rewrite {src}: {e}. Aborting further archive rewrites.")
+                return 1, moved, saved_bytes
+            saved_bytes += max(0, len(content) - len(new_body))
+        moved += 1
+    return 0, moved, saved_bytes
+
+
+def _summary_month_key(path: Path) -> str:
+    """Best-effort YYYY-MM for digest bucketing from filename / mtime."""
+    name = path.name
+    # Prefer leading YYYYMMDD from summary-capture filenames.
+    m = re.match(r"(\d{4})(\d{2})\d{2}", name)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    mtime = datetime.fromtimestamp(path.stat().st_mtime)
+    return mtime.strftime("%Y-%m")
+
+
+def _extract_summary_fields(content: str, path: Path) -> dict[str, str]:
+    sections = _extract_task_sections(content)
+    topic = path.stem
+    # frontmatter topic
+    lines = content.splitlines()
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            if line.lower().startswith("topic:"):
+                topic = line.split(":", 1)[1].strip().strip('"') or topic
+    return {
+        "topic": topic,
+        "summary": sections.get("Summary", "").strip(),
+        "decisions": sections.get("Decisions", "").strip(),
+        "next_step": sections.get("Next Step", "").strip(),
+        "source": sections.get("Source", "").strip(),
+    }
+
+
+def _compact_summaries(
+    keep_recent: int,
+    dry_run: bool,
+) -> tuple[int, int, int]:
+    """Merge older non-digest summaries into monthly digest-YYYY-MM.md files.
+
+    Newest `keep_recent` individual summaries stay as-is. Older ones are grouped
+    by month into digests that keep Decisions + Next Step + topic list so
+    memory-search still finds key terms. Originals are removed only after the
+    digest write succeeds.
+    """
+    files = _iter_summary_md_files(include_digests=False)
+    total = len(files)
+    if total <= keep_recent:
+        safe_print(
+            f"ℹ️  [summaries] {total} file(s), <= keep_recent={keep_recent}. Nothing to compact."
+        )
+        return 0, 0, 0
+
+    keep = files[:keep_recent]
+    merge = files[keep_recent:]
+    by_month: dict[str, list[Path]] = defaultdict(list)
+    for p in merge:
+        by_month[_summary_month_key(p)].append(p)
+
+    orig_bytes = sum(p.stat().st_size for p in merge)
+    safe_print(f"📊 [summaries] plan ({'DRY-RUN' if dry_run else 'LIVE'}):")
+    safe_print(f"   Total summaries: {total}")
+    safe_print(f"   Keep recent:     {keep_recent} ({', '.join(p.name for p in keep[:3])}{'…' if len(keep) > 3 else ''})")
+    safe_print(f"   To merge:        {len(merge)} into {len(by_month)} monthly digest(s)")
+    for month, group in sorted(by_month.items()):
+        safe_print(f"     digest-{month}.md ← {len(group)} file(s)")
+    safe_print(f"   Est. tokens before: {orig_bytes // 4}")
+
+    moved = 0
+    saved_bytes = 0
+    for month, group in sorted(by_month.items()):
+        entries: list[str] = []
+        group_bytes = 0
+        for src in sorted(group, key=lambda p: p.name):
+            try:
+                content = src.read_text(encoding="utf-8")
+            except OSError as e:
+                safe_print(f"⚠️  Cannot read {src.name}: {e}. Skipping.")
+                continue
+            group_bytes += len(content)
+            fields = _extract_summary_fields(content, src)
+            block = [f"### {fields['topic']} (`{src.name}`)"]
+            if fields["summary"] and fields["summary"] != "<!-- none -->":
+                block.append(f"**Summary:** {fields['summary']}")
+            if fields["decisions"] and fields["decisions"] not in ("<!-- none -->", "<!-- pending -->"):
+                block.append(f"**Decisions:** {fields['decisions']}")
+            if fields["next_step"] and fields["next_step"] not in ("<!-- none -->", "<!-- pending -->"):
+                block.append(f"**Next Step:** {fields['next_step']}")
+            entries.append("\n".join(block))
+        if not entries:
+            continue
+        digest_name = f"digest-{month}.md"
+        digest_path = Path(SUMMARIES_DIR) / digest_name
+        existing = ""
+        if digest_path.exists():
+            try:
+                existing = digest_path.read_text(encoding="utf-8").rstrip() + "\n\n"
+            except OSError:
+                existing = ""
+        header = (
+            f"# Summary Digest {month}\n"
+            f"_Merged at {datetime.now().isoformat(timespec='seconds')}_"
+            f" from {len(entries)} summary file(s).\n\n"
+            f"## Decisions\n"
+            f"See per-topic blocks below (searchable via memory-search).\n\n"
+            f"## Topics\n"
+        )
+        # If appending to existing digest, keep prior body and append new topics.
+        if existing and existing.lstrip().startswith("# Summary Digest"):
+            body = existing + "\n".join(entries) + "\n"
+        else:
+            body = header + "\n\n".join(entries) + "\n"
+
+        if not dry_run:
+            try:
+                _atomic_write_text(digest_path, body)
+            except OSError as e:
+                safe_print(f"❌ Failed to write {digest_path}: {e}. Aborting; originals kept.")
+                return 1, moved, saved_bytes
+            for src in group:
+                try:
+                    src.unlink()
+                    moved += 1
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    safe_print(f"⚠️  Digest written but could not remove {src.name}: {e}")
+            saved_bytes += max(0, group_bytes - len(body))
+        else:
+            moved += len(group)
+    return 0, moved, saved_bytes
+
+
+def cmd_compact(
+    strategy: str = "archive-summary",
+    keep_recent: int = 10,
+    threshold: int = ACTIVE_TASK_THRESHOLD,
+    dry_run: bool = False,
+    yes: bool = False,
+    scope: str = "tasks",
+) -> int:
+    """Compact moss-mem Markdown layers to curb long-term MD growth.
+
+    Scopes:
+      - tasks: move old active tasks into archive/ (existing behavior)
+      - archive: secondary-compress older archive bodies (archive-summary)
+      - summaries: merge older session summaries into monthly digest-YYYY-MM.md
+      - all: run tasks → archive → summaries in order
+
+    Strategies (tasks/archive):
+      - archive-summary: keep Description + Next Step + Key Decisions + Landmines
+      - archive-full: keep full body (tasks move only; archive re-summary is no-op)
+
+    Trigger logic:
+      - Always runs when called manually (compact / state compact).
+      - Auto-suggested (via 🛑 STOP nudge) when layer counts exceed thresholds.
+        Auto-execution is never silent — the agent must call `state compact` explicitly.
+
+    Returns exit code 0 on success, 1 on validation error, 2 on user abort.
+    """
+    ensure_tasks_dir()
+    Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
+
+    if strategy not in ("archive-summary", "archive-full"):
+        safe_print(f"❌ Unknown strategy: {strategy}. Use 'archive-summary' or 'archive-full'.")
+        return 1
+    if keep_recent < 1:
+        safe_print(f"❌ keep_recent must be >= 1 (got {keep_recent}).")
+        return 1
+    if threshold < 1:
+        safe_print(f"❌ threshold must be >= 1 (got {threshold}).")
+        return 1
+    scope = (scope or "tasks").strip().lower()
+    if scope not in ("tasks", "archive", "summaries", "all"):
+        safe_print(
+            f"❌ Unknown scope: {scope}. Use tasks|archive|summaries|all."
+        )
+        return 1
+
+    scopes = ["tasks", "archive", "summaries"] if scope == "all" else [scope]
+
+    # Preview all scopes first so one confirmation covers --scope all.
+    safe_print(
+        f"🧭 Compact scope={scope} strategy={strategy} keep_recent={keep_recent} "
+        f"({'DRY-RUN' if dry_run else 'LIVE'})"
+    )
+
+    abort = _confirm_compact(yes=yes, dry_run=dry_run)
+    if abort is not None:
+        return abort
+
+    total_moved = 0
+    total_saved = 0
+    any_work = False
+    for sc in scopes:
+        if sc == "tasks":
+            code, moved, saved = _compact_active_tasks(strategy, keep_recent, dry_run)
+        elif sc == "archive":
+            code, moved, saved = _compact_archive(strategy, keep_recent, dry_run)
+        else:
+            code, moved, saved = _compact_summaries(keep_recent, dry_run)
+        if code != 0:
+            safe_print(f"❌ Scope `{sc}` failed; stopping remaining scopes.")
+            return code
+        if moved:
+            any_work = True
+        total_moved += moved
+        total_saved += saved
+
+    saved_tokens = max(0, total_saved // 4)
     safe_print("")
-    safe_print(f"✅ Compaction {'(dry-run) ' if dry_run else ''}complete:")
-    safe_print(f"   Archived:        {moved} task(s)")
-    safe_print(f"   Est. tokens saved: ~{saved_tokens}")
-    if not dry_run:
-        safe_print(f"   Archive location: {archive_dir}")
-        safe_print("   Next: run knowledge-index to refresh local search")
+    if not any_work and total_moved == 0:
+        safe_print("ℹ️  Compaction complete: nothing to do for selected scope(s).")
+    else:
+        safe_print(f"✅ Compaction {'(dry-run) ' if dry_run else ''}complete:")
+        safe_print(f"   Items processed: {total_moved}")
+        safe_print(f"   Est. tokens saved: ~{saved_tokens}")
+    if not dry_run and any_work:
+        safe_print("   Next: run knowledge-index, then memory-search spot-check key decisions.")
+        safe_print("   🔴 CHECKPOINT: if a key term disappears, stop and re-run with --strategy archive-full")
+        safe_print("      (tasks) or restore the pre-compact summary file from VCS / backup.")
     return 0
 
 
@@ -1599,24 +1928,53 @@ def main():
 
     state_subs.add_parser("recover", help="Interrupt recovery (alias for 'recover')")
 
-    # ── v4: compaction — keep .moss-mem/tasks/ lean ──
-    state_compact_parser = state_subs.add_parser("compact", help="Archive old task files (auto-suggested when > --threshold)")
-    state_compact_parser.add_argument("--strategy", choices=["archive-summary", "archive-full"], default="archive-summary",
-                                      help="archive-summary keeps Description/Key Decisions/Landmines; archive-full keeps the full body. Default: archive-summary")
-    state_compact_parser.add_argument("--keep-recent", type=int, default=10,
-                                      help="Number of newest task files to keep in tasks/. Default: 10")
-    state_compact_parser.add_argument("--threshold", type=int, default=30,
-                                      help="Task count that triggers a 🛑 STOP prompt suggesting compact. Default: 30")
-    state_compact_parser.add_argument("--dry-run", action="store_true",
-                                      help="Show what would be archived without moving any files")
-    state_compact_parser.add_argument("--yes", "-y", action="store_true",
-                                      help="Skip the 🛑 STOP confirmation prompt")
+    # ── v4/v6: compaction — multi-scope MD lifecycle ──
+    state_compact_parser = state_subs.add_parser(
+        "compact",
+        help="Compact tasks/archive/summaries (auto-suggested when layer thresholds exceeded)",
+    )
+    state_compact_parser.add_argument(
+        "--scope",
+        choices=["tasks", "archive", "summaries", "all"],
+        default="tasks",
+        help="Which MD layer to compact. Default: tasks. Use all for long-term cleanup.",
+    )
+    state_compact_parser.add_argument(
+        "--strategy",
+        choices=["archive-summary", "archive-full"],
+        default="archive-summary",
+        help="archive-summary keeps Description/Key Decisions/Landmines; archive-full keeps the full body. Default: archive-summary",
+    )
+    state_compact_parser.add_argument(
+        "--keep-recent",
+        type=int,
+        default=10,
+        help="Newest files to keep untouched in the selected scope. Default: 10",
+    )
+    state_compact_parser.add_argument(
+        "--threshold",
+        type=int,
+        default=ACTIVE_TASK_THRESHOLD,
+        help="Active-task count used by passive nudge (not a hard gate). Default: 30",
+    )
+    state_compact_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be compacted without moving/rewriting files",
+    )
+    state_compact_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the 🛑 STOP confirmation prompt",
+    )
 
     # Top-level alias: `compact` ≡ `state compact` (so /moss-mem compact works directly)
     compact_parser = subparsers.add_parser("compact", help="Alias for 'state compact'")
+    compact_parser.add_argument("--scope", choices=["tasks", "archive", "summaries", "all"], default="tasks")
     compact_parser.add_argument("--strategy", choices=["archive-summary", "archive-full"], default="archive-summary")
     compact_parser.add_argument("--keep-recent", type=int, default=10)
-    compact_parser.add_argument("--threshold", type=int, default=30)
+    compact_parser.add_argument("--threshold", type=int, default=ACTIVE_TASK_THRESHOLD)
     compact_parser.add_argument("--dry-run", action="store_true")
     compact_parser.add_argument("--yes", "-y", action="store_true")
 
@@ -1658,6 +2016,7 @@ def main():
             threshold=args.threshold,
             dry_run=args.dry_run,
             yes=args.yes,
+            scope=getattr(args, "scope", "tasks"),
         ))
     elif args.command == "state":
         # ── v4 state dispatcher ──
@@ -1732,9 +2091,10 @@ def main():
             sys.exit(cmd_compact(
                 strategy=getattr(args, "strategy", "archive-summary"),
                 keep_recent=getattr(args, "keep_recent", 10),
-                threshold=getattr(args, "threshold", 30),
+                threshold=getattr(args, "threshold", ACTIVE_TASK_THRESHOLD),
                 dry_run=getattr(args, "dry_run", False),
                 yes=getattr(args, "yes", False),
+                scope=getattr(args, "scope", "tasks"),
             ))
         else:
             state_parser.print_help()

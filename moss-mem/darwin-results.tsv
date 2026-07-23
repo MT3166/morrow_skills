@@ -1,0 +1,7 @@
+timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
+2026-07-22Tbaseline	82739ed	moss-mem	-	76.7	baseline	all	v5 local-index; 6 prompts; runtime_warn=0	dry_run
+2026-07-22Tround1	25ebc5d	moss-mem	76.7	82.6	keep	dim3/dim2/dim8	HL-2 three-column if-then fallbacks	dry_run
+2026-07-22Tround2	a38124e	moss-mem	82.6	83.8	keep	dim9	blacklist 2-col table; no external memory services	dry_run
+2026-07-22Tround3	0cc76a2	moss-mem	83.8	84.5	keep	dim1	frontmatter what+when+triggers; stdlib-only	dry_run
+2026-07-23Tbaseline	0cc76a2	moss-mem	-	69.6	baseline	all	v6 multi-scope MD lifecycle lens; 8 prompts; 1-6 PASS 7-8 FAIL; runtime_warn=0; unit 22/22	dry_run
+2026-07-23Tround1	957a1da	moss-mem	69.6	89.7	keep	dim7/2/8+3/9	multi-scope compact + passive nudge + digest; unit 25/25; prompts 7-8 PASS	dry_run

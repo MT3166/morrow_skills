@@ -5,11 +5,13 @@ description: >-
   and a Python-stdlib local index (no external memory services). Use when the
   user starts/updates/completes a task, asks "where am I", needs handoff,
   searches prior work, captures a session summary, rebuilds the memory index,
-  runs memory-search, compacts task history, or validates handoff fields.
-  Triggers: start task, update task, complete task, handoff, where am I,
-  show memory, search memory, memory-search, knowledge-index, knowledge-check,
-  compact memory, add note, summary capture.
-version: "5.0.0"
+  runs memory-search, compacts task/archive/summary history, cleans long-term
+  MD growth, or validates handoff fields. Triggers: start task, update task,
+  complete task, handoff, where am I, show memory, search memory, memory-search,
+  knowledge-index, knowledge-check, compact memory, compact archive, compact
+  summaries, multi-scope compact, MD cleanup, lifecycle compact, add note,
+  summary capture, threshold nudge.
+version: "6.0.0"
 ---
 
 # moss-mem — Project memory across sessions
@@ -31,7 +33,8 @@ The skill uses Python's standard library only.
 | Build index | `python3 {base}/scripts/memory_manager.py knowledge-index` |
 | Search memory | `python3 {base}/scripts/memory_manager.py memory-search "refresh race" --limit 10` |
 | Validate | `python3 {base}/scripts/memory_manager.py knowledge-check --strict` |
-| Compact | `python3 {base}/scripts/memory_manager.py state compact --dry-run` |
+| Compact tasks | `python3 {base}/scripts/memory_manager.py state compact --scope tasks --dry-run` |
+| Compact archive / summaries / all | `python3 {base}/scripts/memory_manager.py state compact --scope archive|summaries|all --dry-run` |
 
 `{base}` is this skill's installation directory. All commands are local and
 require no third-party package.
@@ -109,22 +112,53 @@ python3 {base}/scripts/memory_manager.py summary-capture \
 Summaries are stored under `.moss-mem/summaries/` and become searchable after
 `knowledge-index`.
 
-## Compaction
+## Compaction And Long-Term MD Lifecycle
 
-Preview, then explicitly confirm archival of older task files:
+Long-running projects grow Markdown in three hot layers. Compact is **passive
+nudge + active confirm** — never silent auto-delete.
+
+| Layer | Path | Passive nudge default | Active compact |
+|---|---|---|---|
+| Active tasks | `.moss-mem/tasks/*.md` | >30 files after commit/complete | `--scope tasks` (default) |
+| Archive | `.moss-mem/tasks/archive/**/*.md` | >50 files after commit/complete/summary-capture | `--scope archive` secondary summary |
+| Summaries | `.moss-mem/summaries/*.md` (non-digest) | >30 files after summary-capture | `--scope summaries` → monthly `digest-YYYY-MM.md` |
 
 ```bash
-python3 {base}/scripts/memory_manager.py state compact --dry-run
-python3 {base}/scripts/memory_manager.py state compact --strategy archive-summary --keep-recent 10 --yes
+# Preview (always first)
+python3 {base}/scripts/memory_manager.py state compact --scope tasks --dry-run
+python3 {base}/scripts/memory_manager.py state compact --scope archive --dry-run
+python3 {base}/scripts/memory_manager.py state compact --scope summaries --dry-run
+python3 {base}/scripts/memory_manager.py state compact --scope all --dry-run
+
+# Execute after 🛑 STOP confirm (or --yes for non-interactive)
+python3 {base}/scripts/memory_manager.py state compact --scope all --strategy archive-summary --keep-recent 10 --yes
 ```
 
-`archive-summary` keeps Description, Next Step, Key Decisions, and Landmines;
-`archive-full` preserves the complete body. The command normally shows a
-🛑 STOP confirmation; `--yes` is required for non-interactive runs. After
-moving more than five tasks, run `knowledge-check --strict`, search three
-historical terms with `memory-search`, rebuild the index, and run `state show`
-to confirm the active pointer. 🔴 CHECKPOINT: if a key term disappears, stop
-and rerun with `archive-full`.
+### Scope behavior
+
+| `--scope` | Action |
+|---|---|
+| `tasks` | Move older active tasks into `tasks/archive/YYYY/`; `archive-summary` keeps Description / Next Step / Key Decisions / Landmines; `archive-full` keeps full body |
+| `archive` | Re-summarize older archive bodies in place (does not delete files). Newest `--keep-recent` left untouched |
+| `summaries` | Merge older non-digest summaries into `summaries/digest-YYYY-MM.md` (Decisions + Next Step + topic blocks). Originals removed only after digest write succeeds |
+| `all` | Run tasks → archive → summaries in order under one confirmation |
+
+### Passive nudge
+
+`check_compact_threshold` runs after `state commit`, `complete` / `status="✅"`,
+and `summary-capture`. It prints 🛑 STOP with the exact `state compact --scope … --dry-run`
+command for each exceeded layer. **Nudge ≠ permission to delete or auto-compact.**
+
+### Verify after compact
+
+1. `knowledge-index`
+2. `knowledge-check --strict`
+3. `memory-search` on ≥3 historical key terms (e.g. past Key Decisions)
+4. `state show` (active pointer intact)
+
+🔴 CHECKPOINT: if a key term disappears, stop. For tasks/archive re-run with
+`--strategy archive-full`; for summaries restore the pre-merge file from VCS
+and do not re-merge that batch.
 
 ## Handoff Protocol
 
@@ -159,8 +193,11 @@ mode rather than blocking state writes.
 | Empty search results | Widen query tokens / raise `--limit`, rerun `memory-search` | `knowledge-index` then search again; if still empty, note "no hit" and proceed with `state show` context only |
 | Incomplete handoff fields | `state validate --fix` | Set remaining `last_action` / `key_decisions` / `landmines` via `state set`, then `state validate` |
 | Strict layout check fails | Fix missing paths or run `knowledge-index` | Non-strict `knowledge-check`; record layout issues as a task landmine; continue |
-| Compact write fails (disk / permission) | Abort further moves — source task files stay in place | 🛑 STOP, free disk / fix permissions, re-run the same `state compact` args |
-| Key term missing after compact | 🔴 CHECKPOINT — stop using archive-summary for that set | Re-run with `--strategy archive-full`, then `knowledge-index` + `memory-search` spot-check |
+| Compact write fails (disk / permission) | Abort further moves — source files stay in place | 🛑 STOP, free disk / fix permissions, re-run the same `state compact --scope …` args |
+| Key term missing after tasks/archive compact | 🔴 CHECKPOINT — stop using archive-summary for that set | Re-run with `--strategy archive-full`, then `knowledge-index` + `memory-search` spot-check |
+| Key term missing after summaries digest merge | 🔴 CHECKPOINT — stop further merges for that month | Restore originals from VCS/backup; re-index; optional smaller `--keep-recent` batch |
+| `--scope all` fails mid-sequence | Stop remaining scopes; report which scope failed | Fix the failing scope alone (`--scope tasks|archive|summaries`), then resume others |
+| Passive nudge after summary-capture / commit | Show dry-run command only — do not compact yet | Ask user; on yes run `state compact --scope <layer> --dry-run` then confirmed execute |
 
 ## Anti-Patterns / Blacklist
 
@@ -174,8 +211,11 @@ mode rather than blocking state writes.
 | Block `state set` / handoff writes because index/search failed | Finish state change in file-only mode; rebuild index later |
 | Set `key_decisions` / `last_action` / `landmines` before the first `state commit` for a task (P9) | `state commit -m "…"` first, then set handoff fields, verify with `state show` |
 | Chain `state set status="✅"` with `state commit -m "…"` for handoff | Complete archives; commit starts a **new** task. Verify via `MEMORY.md` + `.moss-mem/tasks/archive/` (no `state show --archived`) |
-| Treat threshold nudge after commit/complete as auto-compact permission | Nudge is 🛑 only; user must run `state compact` explicitly |
+| Treat threshold nudge after commit/complete/summary-capture as auto-compact or delete permission | Nudge is 🛑 only; user must run `state compact --scope …` explicitly after dry-run |
+| Hand-delete old `summaries/*.md` or archive files to "clean up" | Use `state compact --scope summaries|archive --dry-run` then confirm; digests preserve Decisions |
 | Hand-write files under `.moss-mem/tasks/archive/` | Archive tree is owned by `state compact` / complete; restore by copying back to `tasks/` if needed |
+| Compact without post-check `memory-search` on key decisions | Always re-index + spot-search ≥3 historical terms before declaring cleanup done |
+| Use `--scope all --yes` on first try in a large repo | Prefer per-scope dry-run first; `--scope all` only after previews look right |
 
 ## File Formats
 

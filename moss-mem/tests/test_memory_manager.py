@@ -303,6 +303,99 @@ class MemoryManagerCLITest(unittest.TestCase):
         removed_name = "mem" + "palace"
         self.assertNotIn(removed_name, result.stdout.lower())
 
+    def test_compact_scope_archive_resummarizes_old_bodies(self):
+        archive = self.project / ".moss-mem/tasks/archive/2026"
+        archive.mkdir(parents=True)
+        # Newest keep-recent=1 left alone; older full-body archive gets re-summarized.
+        old = archive / "20260101-old_task.md"
+        old.write_text(
+            "# Full Archive Body\n\n## Description\nLogin repair\n\n"
+            "## Key Decisions\ntoken refresh race\n\n"
+            "## Landmines\nnone\n\n"
+            "## Scratch Notes\n" + ("noise " * 400) + "\n",
+            encoding="utf-8",
+        )
+        new = archive / "20260720-new_task.md"
+        new.write_text(
+            "# Compacted from recent\n\n## Key Decisions\nkeep me recent\n",
+            encoding="utf-8",
+        )
+        # Ensure mtime order: new is newer
+        os.utime(old, (1_700_000_000, 1_700_000_000))
+        os.utime(new, (1_800_000_000, 1_800_000_000))
+
+        result = self.run_cli(
+            "state", "compact", "--scope", "archive",
+            "--keep-recent", "1", "--yes",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        body = old.read_text(encoding="utf-8")
+        self.assertIn("token refresh race", body)
+        self.assertIn("# Compacted from", body)
+        self.assertNotIn("noise noise", body)
+        self.assertIn("keep me recent", new.read_text(encoding="utf-8"))
+
+    def test_compact_scope_summaries_merges_into_monthly_digest(self):
+        summaries = self.project / ".moss-mem/summaries"
+        summaries.mkdir(parents=True)
+        # 3 old + 1 recent; keep-recent=1 → merge 3 into digest
+        for idx, day in enumerate(("01", "02", "03")):
+            (summaries / f"202601{day}-10000{idx}-topic.md").write_text(
+                "---\ntopic: auth topic\ncreated: 2026-01-0%s 10:00\n---\n\n"
+                "# Harness Summary\n\n## Summary\nsession %s\n\n"
+                "## Decisions\nhttpOnly cookie\n\n## Next Step\nship\n"
+                % (day, day),
+                encoding="utf-8",
+            )
+        recent = summaries / "20260720-999999-recent.md"
+        recent.write_text(
+            "---\ntopic: recent\ncreated: 2026-07-20 10:00\n---\n\n"
+            "# Harness Summary\n\n## Summary\nkeep recent\n\n"
+            "## Decisions\nrecent decision\n",
+            encoding="utf-8",
+        )
+        # mtimes: recent newest
+        for p in summaries.glob("202601*.md"):
+            os.utime(p, (1_700_000_000, 1_700_000_000))
+        os.utime(recent, (1_800_000_000, 1_800_000_000))
+
+        result = self.run_cli(
+            "state", "compact", "--scope", "summaries",
+            "--keep-recent", "1", "--yes",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        digest = summaries / "digest-2026-01.md"
+        self.assertTrue(digest.exists(), result.stdout)
+        digest_text = digest.read_text(encoding="utf-8")
+        self.assertIn("httpOnly cookie", digest_text)
+        self.assertTrue(recent.exists())
+        self.assertEqual(len(list(summaries.glob("202601*.md"))), 0)
+
+        # Search still finds decision after reindex
+        (self.project / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        search = self.run_cli("memory-search", "httpOnly cookie")
+        self.assertEqual(search.returncode, 0, search.stderr + search.stdout)
+        self.assertIn("httpOnly cookie", search.stdout)
+
+    def test_summary_capture_nudge_when_summaries_exceed_threshold(self):
+        summaries = self.project / ".moss-mem/summaries"
+        summaries.mkdir(parents=True)
+        # Create SUMMARY_FILE_THRESHOLD + 1 existing files so capture tips over.
+        limit = memory_manager.SUMMARY_FILE_THRESHOLD
+        for i in range(limit):
+            (summaries / f"20260701-{i:04d}-old.md").write_text(
+                f"# old {i}\n\n## Summary\nx\n", encoding="utf-8"
+            )
+        result = self.run_cli(
+            "summary-capture", "-t", "overflow", "-s", "one more summary",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("STOP", result.stdout)
+        self.assertIn("summaries", result.stdout)
+        self.assertIn("--scope summaries", result.stdout)
+        self.assertIn("never automatic", result.stdout.lower())
+
     def test_second_replace_failure_restores_json_and_markdown(self):
         cache = self.project / ".moss-mem/index-cache"
         cache.mkdir(parents=True)

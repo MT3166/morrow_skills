@@ -34,5 +34,17 @@
     "prompt": "tasks 目录已有 50+ 文件，帮我压缩记忆，并说明怎么验证没丢关键决策。",
     "expected": "state compact --dry-run 预览 → 🛑 STOP 确认 → state compact --strategy archive-summary --keep-recent 10 --yes（若非交互）。归档到 .moss-mem/tasks/archive/。验证：knowledge-check --strict + memory-search 抽查 + state show；🔴 丢词则 archive-full。",
     "type": "compaction_and_verify"
+  },
+  {
+    "id": 7,
+    "prompt": "长期使用后 archive 里有 60+ 归档任务、summaries 有 40+ session 摘要。请清理压缩，但 token refresh race 和 httpOnly cookie 这些关键决策必须还能搜到。",
+    "expected": "被动：commit/complete/summary-capture 后对 archive>50 / summaries>30 打出 🛑 STOP nudge（不是自动执行）。主动：state compact --scope archive|summaries|all --dry-run → 🛑/—yes；archive 二次 archive-summary 压缩；summaries 合并为 digest-YYYY-MM.md（保留 Decisions/Next Step）。然后 knowledge-index + memory-search 抽查关键决策；🔴 丢词则改 archive-full / 停止合并。禁止静默删除。",
+    "type": "multi_scope_lifecycle_compact"
+  },
+  {
+    "id": 8,
+    "prompt": "summary-capture 后系统提示 summaries 超阈值了，我是不是该直接删旧 md？",
+    "expected": "否。nudge ≠ 授权删除。正确路径：state compact --scope summaries --dry-run → 用户确认 → digest 合并；或 --scope all。禁止手删/手改 archive 与 index-cache；验证用 memory-search + knowledge-check。",
+    "type": "nudge_not_delete_blacklist"
   }
 ]
