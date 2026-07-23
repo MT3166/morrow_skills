@@ -5,3 +5,4 @@ timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
 2026-07-22Tround3	0cc76a2	moss-mem	83.8	84.5	keep	dim1	frontmatter what+when+triggers; stdlib-only	dry_run
 2026-07-23Tbaseline	0cc76a2	moss-mem	-	69.6	baseline	all	v6 multi-scope MD lifecycle lens; 8 prompts; 1-6 PASS 7-8 FAIL; runtime_warn=0; unit 22/22	dry_run
 2026-07-23Tround1	957a1da	moss-mem	69.6	89.7	keep	dim7/2/8+3/9	multi-scope compact + passive nudge + digest; unit 25/25; prompts 7-8 PASS	dry_run
+2026-07-23Tround2	pending	moss-mem	89.7	89.7	hygiene	dim2/5/8	Quick Dispatch + defaults table + scope-all test; score flat; HL-4 plateau	dry_run

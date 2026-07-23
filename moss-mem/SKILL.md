@@ -11,7 +11,7 @@ description: >-
   knowledge-index, knowledge-check, compact memory, compact archive, compact
   summaries, multi-scope compact, MD cleanup, lifecycle compact, add note,
   summary capture, threshold nudge.
-version: "6.0.0"
+version: "6.0.1"
 ---
 
 # moss-mem — Project memory across sessions
@@ -30,14 +30,27 @@ The skill uses Python's standard library only.
 | Set state | `python3 {base}/scripts/memory_manager.py state set current_task="repair login" next_step="inspect auth.py" status="🔧"` |
 | Commit snapshot | `python3 {base}/scripts/memory_manager.py state commit -m "auth handoff"` |
 | Add note | `python3 {base}/scripts/memory_manager.py state note "found refresh race"` |
+| Capture session summary | `python3 {base}/scripts/memory_manager.py summary-capture -t "topic" -s "summary" --decisions "…" -n "next"` |
 | Build index | `python3 {base}/scripts/memory_manager.py knowledge-index` |
 | Search memory | `python3 {base}/scripts/memory_manager.py memory-search "refresh race" --limit 10` |
-| Validate | `python3 {base}/scripts/memory_manager.py knowledge-check --strict` |
+| Layout validate | `python3 {base}/scripts/memory_manager.py knowledge-check --strict` |
+| Handoff validate | `python3 {base}/scripts/memory_manager.py state validate` then `state validate --fix` if needed |
+| Recover lock / interrupt | `python3 {base}/scripts/memory_manager.py state recover` |
 | Compact tasks | `python3 {base}/scripts/memory_manager.py state compact --scope tasks --dry-run` |
-| Compact archive / summaries / all | `python3 {base}/scripts/memory_manager.py state compact --scope archive|summaries|all --dry-run` |
+| Compact archive / summaries / all | `python3 {base}/scripts/memory_manager.py state compact --scope all --dry-run` (or `archive` / `summaries`) |
 
 `{base}` is this skill's installation directory. All commands are local and
 require no third-party package.
+
+### Compact defaults
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--scope` | `tasks` | `tasks` / `archive` / `summaries` / `all` |
+| `--strategy` | `archive-summary` | tasks+archive only; summaries always digest-merge |
+| `--keep-recent` | `10` | newest files left untouched in the selected scope |
+| `--threshold` | `30` | active-task nudge only (archive 50 / summaries 30 are fixed in code) |
+| `--dry-run` / `--yes` | off | preview first; `--yes` skips 🛑 STOP |
 
 ## Storage And Ownership
 

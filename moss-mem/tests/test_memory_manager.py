@@ -396,6 +396,95 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertIn("--scope summaries", result.stdout)
         self.assertIn("never automatic", result.stdout.lower())
 
+    def test_compact_scope_all_runs_tasks_archive_and_summaries(self):
+        tasks = self.project / ".moss-mem/tasks"
+        archive = tasks / "archive" / "2026"
+        summaries = self.project / ".moss-mem/summaries"
+        archive.mkdir(parents=True)
+        summaries.mkdir(parents=True)
+
+        # Active tasks: keep-recent=1 archives the older one
+        old_task = tasks / "20260101-100000_task.md"
+        new_task = tasks / "20260720-100000_task.md"
+        old_task.write_text(
+            "# Task old\n\n## Description\nold task\n\n## Key Decisions\ntoken refresh race\n",
+            encoding="utf-8",
+        )
+        new_task.write_text(
+            "# Task new\n\n## Description\nnew task\n\n## Key Decisions\nkeep active\n",
+            encoding="utf-8",
+        )
+        os.utime(old_task, (1_700_000_000, 1_700_000_000))
+        os.utime(new_task, (1_800_000_000, 1_800_000_000))
+
+        # Archive: older full body gets re-summarized; newest kept
+        arch_old = archive / "20260102-arch_task.md"
+        arch_new = archive / "20260721-arch_task.md"
+        arch_old.write_text(
+            "# Full Archive\n\n## Description\narch\n\n## Key Decisions\ntoken refresh race\n\n"
+            "## Scratch\n" + ("noise " * 400) + "\n",
+            encoding="utf-8",
+        )
+        arch_new.write_text(
+            "# Compacted from recent\n\n## Key Decisions\narchive recent\n",
+            encoding="utf-8",
+        )
+        os.utime(arch_old, (1_700_000_100, 1_700_000_100))
+        os.utime(arch_new, (1_800_000_100, 1_800_000_100))
+
+        # Summaries: merge older into digest; keep newest
+        for idx, day in enumerate(("03", "04")):
+            p = summaries / f"202601{day}-10000{idx}-topic.md"
+            p.write_text(
+                "---\ntopic: t%s\n---\n\n# S\n\n## Summary\ns\n\n## Decisions\nhttpOnly cookie\n"
+                % day,
+                encoding="utf-8",
+            )
+            os.utime(p, (1_700_000_200, 1_700_000_200))
+        recent_sum = summaries / "20260722-999999-recent.md"
+        recent_sum.write_text(
+            "---\ntopic: recent\n---\n\n# S\n\n## Summary\nkeep\n\n## Decisions\nrecent only\n",
+            encoding="utf-8",
+        )
+        os.utime(recent_sum, (1_800_000_200, 1_800_000_200))
+
+        result = self.run_cli(
+            "state", "compact", "--scope", "all",
+            "--keep-recent", "1", "--yes",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("scope=all", result.stdout)
+        self.assertIn("[tasks]", result.stdout)
+        self.assertIn("[archive]", result.stdout)
+        self.assertIn("[summaries]", result.stdout)
+
+        # tasks: only newest remains active; old moved into archive/
+        self.assertFalse(old_task.exists())
+        self.assertTrue(new_task.exists())
+        archived_old = list((tasks / "archive").rglob("*20260101-100000_task.md"))
+        self.assertTrue(archived_old, result.stdout)
+        self.assertIn("token refresh race", archived_old[0].read_text(encoding="utf-8"))
+
+        # archive: old body re-summarized
+        arch_body = arch_old.read_text(encoding="utf-8")
+        self.assertIn("token refresh race", arch_body)
+        self.assertIn("# Compacted from", arch_body)
+        self.assertNotIn("noise noise", arch_body)
+
+        # summaries: digest created; recent kept
+        digest = summaries / "digest-2026-01.md"
+        self.assertTrue(digest.exists(), result.stdout)
+        self.assertIn("httpOnly cookie", digest.read_text(encoding="utf-8"))
+        self.assertTrue(recent_sum.exists())
+        self.assertEqual(len(list(summaries.glob("202601*.md"))), 0)
+
+        (self.project / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        for term in ("token refresh race", "httpOnly cookie"):
+            search = self.run_cli("memory-search", term)
+            self.assertEqual(search.returncode, 0, search.stderr + search.stdout)
+            self.assertIn(term, search.stdout)
+
     def test_second_replace_failure_restores_json_and_markdown(self):
         cache = self.project / ".moss-mem/index-cache"
         cache.mkdir(parents=True)
