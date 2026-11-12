@@ -10,6 +10,7 @@ import argparse
 import atexit
 import builtins
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 import hashlib
 import os
@@ -21,7 +22,7 @@ import json
 import re
 import subprocess
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # --- Windows console encoding shim ---
@@ -120,10 +121,17 @@ SUMMARIES_DIR = ".moss-mem/summaries"
 INDEX_CACHE_DIR = ".moss-mem/index-cache"
 ARCHIVE_FILE = "MEMORY_ARCHIVE.md"
 OLD_TASKS_DIR = "MEMORY_TASKS"  # legacy — migrated on init
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 INDEX_JSON_FILE = "memory-index.json"
 INDEX_MD_FILE = "memory-index.md"
 TRANSACTIONS_DIR = ".moss-mem/transactions"
+SEMANTIC_SCHEMA_VERSION = 2
+_MEMORY_ID_RE = re.compile(r"^mem_[0-9a-f]{32}$")
+_TRUST_RE = re.compile(r"^-?(?:0|1|[0-9]+(?:\.[0-9]{1,6})?)$")
+_METADATA_KEYS = (
+    "source", "trust", "recorded_at", "valid_from", "valid_to", "supersedes",
+)
+_DATETIME_CLASS = datetime
 
 # Auto-detect script location so callers don't need absolute paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -133,6 +141,124 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 def get_timestamp():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+class MetadataValidationError(ValueError):
+    """Raised when a semantic metadata field violates Schema v2."""
+
+
+def _legacy_memory_id(path: Path) -> str:
+    """Return a deterministic, read-only ID for a legacy relative path."""
+    relative = os.path.relpath(Path(path), Path.cwd()).replace(os.sep, "/")
+    return "legacy:" + hashlib.sha256(relative.encode("utf-8")).hexdigest()
+
+
+def _new_memory_id(existing: set[str] | None = None) -> str:
+    """Generate a Schema v2 ID, retrying if the supplied set already has it."""
+    known = existing or set()
+    while True:
+        value = f"mem_{secrets.token_hex(16)}"
+        if value not in known:
+            return value
+
+
+def _normalize_source(value: str | None) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    normalized = str(value).strip()
+    if "\n" in normalized or "\r" in normalized:
+        raise MetadataValidationError("source must not contain newlines")
+    if len(normalized) > 160:
+        raise MetadataValidationError("source must be at most 160 characters")
+    return normalized
+
+
+def _normalize_trust(value: str | int | float | None) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    if not _TRUST_RE.fullmatch(raw):
+        raise MetadataValidationError("trust must be a finite decimal in [0,1] with at most 6 decimals")
+    try:
+        decimal_value = Decimal(raw)
+    except (InvalidOperation, ValueError) as exc:
+        raise MetadataValidationError("trust is not a valid decimal") from exc
+    if not decimal_value.is_finite() or decimal_value < 0 or decimal_value > 1:
+        raise MetadataValidationError("trust must be in [0,1]")
+    if decimal_value == 0:
+        return "0.0"
+    normalized = format(decimal_value, "f").rstrip("0").rstrip(".")
+    return normalized if "." in normalized else f"{normalized}.0"
+
+
+def _normalize_time(value: str | None, field: str) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    try:
+        parsed = _DATETIME_CLASS.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+    except ValueError as exc:
+        raise MetadataValidationError(f"{field} must be timezone-bearing ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MetadataValidationError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(".000000+", "+")
+
+
+def _normalize_supersedes(value: str | None) -> list[str]:
+    if value is None or not str(value).strip():
+        return []
+    return sorted({item.strip() for item in str(value).split(";") if item.strip()})
+
+
+def _parse_memory_metadata(
+    frontmatter: dict[str, str],
+    path: Path,
+    known_ids: set[str] | None = None,
+) -> dict:
+    """Parse Schema v2 metadata without modifying the source file."""
+    raw_schema = frontmatter.get("schema_version")
+    if raw_schema is None or str(raw_schema).strip() in {"", "1"}:
+        return {
+            "schema_version": 1,
+            "memory_id": _legacy_memory_id(path),
+            "source": None,
+            "trust": None,
+            "recorded_at": None,
+            "valid_from": None,
+            "valid_to": None,
+            "supersedes": [],
+            "legacy": True,
+        }
+    try:
+        schema = int(str(raw_schema).strip())
+    except (TypeError, ValueError) as exc:
+        raise MetadataValidationError("schema_version must be integer 1 or 2") from exc
+    if schema != SEMANTIC_SCHEMA_VERSION:
+        raise MetadataValidationError(f"unsupported schema_version: {raw_schema}")
+
+    memory_id = str(frontmatter.get("memory_id", "")).strip()
+    if not _MEMORY_ID_RE.fullmatch(memory_id):
+        raise MetadataValidationError("memory_id must be mem_ plus 32 lowercase hexadecimal characters")
+    if known_ids is not None and memory_id in known_ids:
+        raise MetadataValidationError(f"duplicate memory_id: {memory_id}")
+    source = _normalize_source(frontmatter.get("source"))
+    trust = _normalize_trust(frontmatter.get("trust"))
+    recorded_at = _normalize_time(frontmatter.get("recorded_at"), "recorded_at")
+    valid_from = _normalize_time(frontmatter.get("valid_from"), "valid_from")
+    valid_to = _normalize_time(frontmatter.get("valid_to"), "valid_to")
+    if valid_from and valid_to and valid_to <= valid_from:
+        raise MetadataValidationError("valid_to must be later than valid_from")
+    return {
+        "schema_version": SEMANTIC_SCHEMA_VERSION,
+        "memory_id": memory_id,
+        "source": source,
+        "trust": trust,
+        "recorded_at": recorded_at,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
+        "supersedes": _normalize_supersedes(frontmatter.get("supersedes")),
+        "legacy": False,
+    }
 
 
 def _unique_timestamped_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
@@ -413,14 +539,23 @@ def _create_default_memory():
 # ---------------------------------------------------------------------------
 
 @locked_mutation("start")
-def cmd_start(description: str, next_step: str):
+def cmd_start(description: str, next_step: str, source: str | None = None, trust: str | None = None, valid_from: str | None = None, valid_to: str | None = None, supersedes: str | None = None):
     """Start a new task: create timestamped task file and update MEMORY.md."""
     ensure_tasks_dir()
     ts = get_timestamp()
     task_file = str(_unique_timestamped_path(Path(TASKS_DIR), f"{ts}_task"))
+    v2_fields = _render_v2_frontmatter(
+        source=source,
+        trust=trust,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        supersedes=supersedes,
+    )
 
     with _open(task_file, "w") as f:
-        f.write(f"---\nname: {ts}_task\ndescription: {description}\ntype: task\n---\n\n")
+        f.write("---\n")
+        f.write("\n".join(v2_fields) + "\n")
+        f.write(f"name: {ts}_task\ndescription: {description}\ntype: task\n---\n\n")
         f.write(f"# Task - {ts}\n\n")
         f.write(f"## Description\n{description}\n\n")
         f.write(f"## Next Step\n{next_step}\n\n")
@@ -443,7 +578,10 @@ def cmd_start(description: str, next_step: str):
 
 @locked_mutation("update")
 def cmd_update(description: str, next_step: str, status: str,
-               last_action: str = None, key_decisions: str = None, landmines: str = None):
+               last_action: str = None, key_decisions: str = None, landmines: str = None,
+               source: str | None = None, trust: str | None = None,
+               valid_from: str | None = None, valid_to: str | None = None,
+               supersedes: str | None = None):
     """Update current task progress in MEMORY.md."""
     _memory_update({
         "touch": True,
@@ -453,9 +591,20 @@ def cmd_update(description: str, next_step: str, status: str,
     })
 
     # Write to task file if any handoff fields are provided
-    if last_action or key_decisions or landmines:
+    if last_action or key_decisions or landmines or any(
+        value is not None for value in (source, trust, valid_from, valid_to, supersedes)
+    ):
         task_file = get_current_task_file()
         if task_file and Path(task_file).exists():
+            if any(value is not None for value in (source, trust, valid_from, valid_to, supersedes)):
+                _update_task_metadata(
+                    task_file,
+                    source=source,
+                    trust=trust,
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    supersedes=supersedes,
+                )
             _update_task_file(task_file, last_action, key_decisions, landmines)
 
     safe_print(f"✅ MEMORY.md updated")
@@ -821,7 +970,162 @@ def _parse_memory_record(path, record_id):
         sections[current] = "\n".join(buffer).strip()
     created = frontmatter.get("created", "") or (sections.get("Created", "").splitlines()[0].strip() if sections.get("Created") else "")
     preview_source = next((sections[name] for name in ("Description", "Summary", "Key Decisions", "Decisions", "Next Step") if sections.get(name)), title)
-    return {"id": record_id, "path": str(path), "kind": _classify_source(path), "title": frontmatter.get("topic") or frontmatter.get("description") or title, "created": created, "mtime_ns": path.stat().st_mtime_ns, "sections": sections, "preview": " ".join(preview_source.split())[:240]}
+    if frontmatter:
+        metadata = _parse_memory_metadata(frontmatter, path)
+    else:
+        # Compacted summaries have no frontmatter.  Preserve the metadata of
+        # the first topic block so a digest remains semantically searchable
+        # after its source summary has been removed.  Older digests without a
+        # marker continue to use the legacy virtual metadata shape.
+        marker_metadata = None
+        for line in lines:
+            if "moss-mem-meta:" not in line:
+                continue
+            marker_metadata = _parse_digest_metadata_marker(line)
+            if marker_metadata is not None:
+                break
+        metadata = (
+            _parse_digest_metadata(marker_metadata, path)
+            if marker_metadata is not None
+            else _parse_memory_metadata({}, path)
+        )
+    return {
+        "id": record_id,
+        "path": str(path),
+        "kind": _classify_source(path),
+        "title": frontmatter.get("topic") or frontmatter.get("description") or title,
+        "created": created,
+        "mtime_ns": path.stat().st_mtime_ns,
+        "sections": sections,
+        "preview": " ".join(preview_source.split())[:240],
+        "memory_id": metadata["memory_id"],
+        "schema_version": metadata["schema_version"],
+        "metadata": metadata,
+    }
+
+
+def _parse_digest_block_record(path: Path, record_id: int, block: list[str], block_index: int) -> dict:
+    """Parse one `### topic` block from a compacted summary digest."""
+    heading = block[0][4:].strip() if block and block[0].startswith("### ") else path.stem
+    title = re.sub(r"\s+\(`[^`]+`\)$", "", heading).strip() or path.stem
+    sections: dict[str, str] = {}
+    for line in block[1:]:
+        match = re.match(r"\*\*(Summary|Decisions|Next Step):\*\*\s*(.*)$", line)
+        if match:
+            sections[match.group(1)] = match.group(2).strip()
+    marker_metadata = next(
+        (_parse_digest_metadata_marker(line) for line in block if "moss-mem-meta:" in line),
+        None,
+    )
+    if marker_metadata is not None:
+        metadata = _parse_digest_metadata(marker_metadata, path)
+    else:
+        # Distinct virtual IDs avoid collisions when a partially migrated
+        # digest contains both marked and unmarked topic blocks.
+        metadata = _parse_memory_metadata({}, Path(f"{path}#block-{block_index}"))
+    preview_source = next((sections[name] for name in ("Summary", "Decisions", "Next Step") if sections.get(name)), title)
+    return {
+        "id": record_id,
+        "path": str(path),
+        "kind": _classify_source(path),
+        "title": title,
+        "created": "",
+        "mtime_ns": path.stat().st_mtime_ns,
+        "sections": sections,
+        "preview": " ".join(preview_source.split())[:240],
+        "memory_id": metadata["memory_id"],
+        "schema_version": metadata["schema_version"],
+        "metadata": metadata,
+    }
+
+
+def _parse_memory_records(path: Path, first_record_id: int) -> list[dict]:
+    """Parse a source file, expanding multi-topic v2 digests when present."""
+    content = path.read_text(encoding="utf-8")
+    marker_count = sum(1 for line in content.splitlines() if "moss-mem-meta:" in line)
+    headings = [index for index, line in enumerate(content.splitlines()) if line.startswith("### ")]
+    if marker_count <= 1 or len(headings) <= 1:
+        return [_parse_memory_record(path, first_record_id)]
+    lines = content.splitlines()
+    records = []
+    for block_index, start in enumerate(headings):
+        end = headings[block_index + 1] if block_index + 1 < len(headings) else len(lines)
+        records.append(_parse_digest_block_record(path, first_record_id + block_index, lines[start:end], block_index))
+    return records
+
+
+def _parse_digest_metadata_marker(line: str) -> dict | None:
+    """Parse one compact digest metadata marker, returning its JSON object."""
+    match = re.search(r"<!--\s*moss-mem-meta:\s*(\{.*\})\s*-->", line)
+    if not match:
+        return None
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise MetadataValidationError("invalid moss-mem-meta JSON marker") from exc
+    if not isinstance(value, dict):
+        raise MetadataValidationError("moss-mem-meta marker must contain an object")
+    return value
+
+
+def _parse_digest_metadata(value: dict, path: Path) -> dict:
+    """Normalize a JSON digest marker using the Schema v2 contract."""
+    frontmatter = {}
+    for key, raw in value.items():
+        if key not in {"schema_version", "memory_id", *_METADATA_KEYS}:
+            continue
+        if raw is None:
+            frontmatter[key] = ""
+        elif key == "supersedes" and isinstance(raw, list):
+            frontmatter[key] = ";".join(str(item) for item in raw)
+        elif key == "trust" and isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            # JSON may emit a small finite number as 1e-06; convert it back to
+            # fixed-point before the stricter Schema v2 decimal validator.
+            frontmatter[key] = format(Decimal(str(raw)), "f")
+        else:
+            frontmatter[key] = str(raw)
+    # JSON null means an omitted optional field, whereas an empty string is
+    # already treated as omitted by the canonical normalizers.
+    for key in _METADATA_KEYS:
+        if value.get(key) is None:
+            frontmatter.pop(key, None)
+    return _parse_memory_metadata(frontmatter, path)
+
+
+def _build_supersession_graph(records: list[dict]) -> dict[str, list[str]]:
+    """Build deterministic reverse edges and reject dangling/cyclic relations."""
+    ids = [record["memory_id"] for record in records]
+    if len(ids) != len(set(ids)):
+        raise MetadataValidationError("duplicate memory_id")
+    known = set(ids)
+    forward: dict[str, list[str]] = {memory_id: [] for memory_id in ids}
+    reverse: dict[str, list[str]] = {memory_id: [] for memory_id in ids}
+    for record in records:
+        current = record["memory_id"]
+        for target in record.get("metadata", {}).get("supersedes", []):
+            if target not in known:
+                raise MetadataValidationError(f"supersedes references unknown memory_id: {target}")
+            if target == current:
+                raise MetadataValidationError(f"memory_id supersedes itself: {current}")
+            forward[current].append(target)
+            reverse[target].append(current)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visiting:
+            raise MetadataValidationError("supersedes graph contains a cycle")
+        if node in visited:
+            return
+        visiting.add(node)
+        for target in forward[node]:
+            visit(target)
+        visiting.remove(node)
+        visited.add(node)
+
+    for memory_id in sorted(forward):
+        visit(memory_id)
+    return {memory_id: sorted(values) for memory_id, values in reverse.items()}
 
 
 def _current_source_metadata():
@@ -834,15 +1138,17 @@ def _build_index_payload():
         records, warnings, inverted = [], [], defaultdict(set)
         for path in _discover_memory_sources():
             try:
-                record = _parse_memory_record(path, len(records))
+                parsed_records = _parse_memory_records(path, len(records))
             except (OSError, UnicodeError) as exc:
                 warnings.append(f"skipped unreadable source {path}: {exc}")
                 continue
-            records.append(record)
-            for term in _tokenize(" ".join([record["title"], *record["sections"].values()])):
-                inverted[term].add(record["id"])
+            for record in parsed_records:
+                records.append(record)
+                for term in _tokenize(" ".join([record["title"], *record["sections"].values()])):
+                    inverted[term].add(record["id"])
         if not records:
             raise ValueError("no readable memory sources")
+        superseded_by = _build_supersession_graph(records)
         after = _current_source_metadata()
         if before != after:
             if attempt == 0:
@@ -854,6 +1160,7 @@ def _build_index_payload():
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "sources": {r["path"]: r["mtime_ns"] for r in records},
             "records": records,
+            "superseded_by": superseded_by,
             "inverted_terms": {t: sorted(ids) for t, ids in sorted(inverted.items())},
         }
         return payload, warnings
@@ -863,6 +1170,60 @@ def _build_index_payload():
 FIELD_WEIGHTS = {"title": 8, "Description": 5, "Summary": 5, "Decisions": 5, "Key Decisions": 5, "Landmines": 5, "Related Files": 3, "Next Step": 3}
 def _load_index_payload():
     with _open(Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE) as handle: return json.load(handle)
+
+
+def _validate_index_metadata(record: dict) -> str | None:
+    """Validate one serialized record and return an actionable error."""
+    memory_id = record.get("memory_id")
+    schema = record.get("schema_version")
+    metadata = record.get("metadata")
+    if not isinstance(memory_id, str) or not isinstance(schema, int) or isinstance(schema, bool):
+        return "schema mismatch"
+    if not isinstance(metadata, dict):
+        return f"record {memory_id}: metadata must be an object"
+    required = {"schema_version", "memory_id", *_METADATA_KEYS, "legacy"}
+    if not required.issubset(metadata):
+        return f"record {memory_id}: metadata keys are incomplete"
+    if metadata.get("memory_id") != memory_id or metadata.get("schema_version") != schema:
+        return f"record {memory_id}: metadata identity mismatch"
+    if schema == 2:
+        if not _MEMORY_ID_RE.fullmatch(memory_id) or metadata.get("legacy") is not False:
+            return f"record {memory_id}: invalid Schema v2 identity"
+    elif schema == 1:
+        if not memory_id.startswith("legacy:") or metadata.get("legacy") is not True:
+            return f"record {memory_id}: invalid legacy identity"
+    else:
+        return f"record {memory_id}: unsupported schema_version {schema!r}"
+
+    source = metadata.get("source")
+    if source is not None and not isinstance(source, str):
+        return f"record {memory_id}: source must be string or null"
+    trust = metadata.get("trust")
+    if trust is not None and (not isinstance(trust, str) or _normalize_trust(trust) != trust):
+        return f"record {memory_id}: trust is not canonical"
+    for field in ("recorded_at", "valid_from", "valid_to"):
+        value = metadata.get(field)
+        if value is not None:
+            if not isinstance(value, str):
+                return f"record {memory_id}: {field} must be string or null"
+            try:
+                if _normalize_time(value, field) != value:
+                    return f"record {memory_id}: {field} is not canonical"
+            except MetadataValidationError as exc:
+                return f"record {memory_id}: {exc}"
+    valid_from, valid_to = metadata.get("valid_from"), metadata.get("valid_to")
+    if valid_from and valid_to and valid_to <= valid_from:
+        return f"record {memory_id}: valid_to must be later than valid_from"
+    supersedes = metadata.get("supersedes")
+    if not isinstance(supersedes, list) or any(not isinstance(item, str) for item in supersedes):
+        return f"record {memory_id}: supersedes must be a string list"
+    if supersedes != sorted(set(supersedes)):
+        return f"record {memory_id}: supersedes must be sorted and deduplicated"
+    if schema == 1 and supersedes:
+        return f"record {memory_id}: legacy records cannot supersede other records"
+    return None
+
+
 def _index_problem(payload):
     if not isinstance(payload, dict): return "schema mismatch"
     if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
@@ -875,7 +1236,7 @@ def _index_problem(payload):
     if not isinstance(records, list) or not records: return "schema mismatch"
     allowed = {"memory", "task", "archived-task", "archive-index", "summary"}
     ids = set()
-    required = {"id", "path", "kind", "title", "created", "mtime_ns", "sections", "preview"}
+    required = {"id", "path", "kind", "title", "created", "mtime_ns", "sections", "preview", "memory_id", "schema_version", "metadata"}
     for record in records:
         if not isinstance(record, dict) or not required.issubset(record): return "schema mismatch"
         if (not isinstance(record["id"], int) or isinstance(record["id"], bool) or record["id"] < 0 or record["id"] in ids
@@ -885,6 +1246,12 @@ def _index_problem(payload):
                 or not isinstance(record["sections"], dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in record["sections"].items())
                 or not isinstance(record["preview"], str)):
             return "schema mismatch"
+        try:
+            metadata_problem = _validate_index_metadata(record)
+        except MetadataValidationError as exc:
+            return f"metadata validation: {exc}"
+        if metadata_problem:
+            return metadata_problem
         ids.add(record["id"])
         if indexed.get(record["path"]) != record["mtime_ns"]: return "schema mismatch"
     if set(indexed) != {r["path"] for r in records}: return "schema mismatch"
@@ -898,6 +1265,25 @@ def _index_problem(payload):
             refs = inverted.get(term)
             if not isinstance(refs, list) or record["id"] not in refs:
                 return "inverted index incomplete"
+    memory_ids = [record["memory_id"] for record in records]
+    if len(memory_ids) != len(set(memory_ids)):
+        return "metadata validation: duplicate memory_id"
+    try:
+        expected_superseded_by = _build_supersession_graph(records)
+    except MetadataValidationError as exc:
+        return f"metadata validation: {exc}"
+    superseded_by = payload.get("superseded_by")
+    if not isinstance(superseded_by, dict):
+        return "schema mismatch"
+    if set(superseded_by) != set(memory_ids):
+        return "metadata validation: superseded_by keys mismatch"
+    for key, values in superseded_by.items():
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            return f"metadata validation: superseded_by[{key}] must be a string list"
+        if values != sorted(set(values)):
+            return f"metadata validation: superseded_by[{key}] is not sorted and deduplicated"
+    if superseded_by != expected_superseded_by:
+        return "metadata validation: superseded_by does not match supersedes"
     current = _current_source_metadata()
     if set(current) != set(indexed): return "source set changed"
     if any(current[p] != indexed[p] for p in current): return "source modified"
@@ -932,7 +1318,92 @@ def _matching_excerpt(record, query, terms):
         flat = " ".join(value.split())
         if nq in flat.lower() or any(t in _tokenize(flat.lower()) for t in terms): return flat[:240]
     return record["preview"][:240]
-def _search_records(payload, query, limit):
+
+
+def _result_metadata(result: dict) -> dict:
+    metadata = result.get("record", {}).get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    return {
+        "schema_version": result.get("record", {}).get("schema_version", 1),
+        "memory_id": result.get("record", {}).get("memory_id", f"legacy:{result.get('record', {}).get('id', '')}"),
+        "source": None,
+        "trust": None,
+        "recorded_at": None,
+        "valid_from": None,
+        "valid_to": None,
+        "supersedes": [],
+        "legacy": True,
+    }
+
+
+def _filter_search_records(
+    results: list[dict],
+    source: str | None = None,
+    min_trust: str | None = None,
+    as_of: str | None = None,
+    include_superseded: bool = False,
+) -> list[dict]:
+    """Apply exact metadata filters after lexical candidate generation."""
+    del include_superseded  # It controls relation rendering, never inclusion.
+    normalized_source = _normalize_source(source)
+    threshold = Decimal(_normalize_trust(min_trust)) if min_trust is not None else None
+    normalized_as_of = _normalize_time(as_of, "as_of") if as_of is not None else None
+    filtered = []
+    for result in results:
+        metadata = _result_metadata(result)
+        if normalized_source is not None and metadata.get("source") != normalized_source:
+            continue
+        trust = metadata.get("trust")
+        if threshold is not None:
+            if trust is None or Decimal(trust) < threshold:
+                continue
+        if normalized_as_of is not None:
+            valid_from = _normalize_time(metadata.get("valid_from"), "valid_from") if metadata.get("valid_from") else None
+            valid_to = _normalize_time(metadata.get("valid_to"), "valid_to") if metadata.get("valid_to") else None
+            # Unknown valid time is intentionally excluded only when the
+            # caller asks for an as-of snapshot.
+            if valid_from is None and valid_to is None:
+                continue
+            if valid_from is not None and normalized_as_of < valid_from:
+                continue
+            if valid_to is not None and normalized_as_of >= valid_to:
+                continue
+        filtered.append(result)
+    return filtered
+
+
+def _search_sort_key(result: dict, as_of: str | None = None):
+    metadata = _result_metadata(result)
+    if as_of is None:
+        validity_rank = 0
+    else:
+        valid_from = _normalize_time(metadata.get("valid_from"), "valid_from") if metadata.get("valid_from") else None
+        valid_to = _normalize_time(metadata.get("valid_to"), "valid_to") if metadata.get("valid_to") else None
+        validity_rank = 2 if (valid_from is None or as_of >= valid_from) and (valid_to is None or as_of < valid_to) else 1
+    trust_rank = 1 if metadata.get("trust") is not None else 0
+    superseded_by = result.get("superseded_by", [])
+    superseded_rank = 0 if superseded_by else 1
+    return (
+        -result["score"],
+        -validity_rank,
+        -trust_rank,
+        -superseded_rank,
+        str(metadata.get("memory_id", "")),
+        -result["record"].get("mtime_ns", 0),
+        result["record"].get("path", ""),
+    )
+
+
+def _search_records(
+    payload,
+    query,
+    limit,
+    source=None,
+    min_trust=None,
+    as_of=None,
+    include_superseded=False,
+):
     if limit < 1: raise ValueError("limit must be >= 1")
     terms = list(dict.fromkeys(_tokenize(query))); ids = set()
     if terms:
@@ -943,8 +1414,48 @@ def _search_records(payload, query, limit):
     for rid in ids:
         if rid in by_id:
             r = by_id[rid]; s = _score_record(r, query, terms)
-            if s > 0: out.append({"score": s, "record": r, "excerpt": _matching_excerpt(r, query, terms)})
-    out.sort(key=lambda x: (-x["score"], -x["record"]["mtime_ns"], x["record"]["path"])); return out[:limit]
+            if s > 0:
+                memory_id = r.get("memory_id", f"legacy:{rid}")
+                out.append({
+                    "score": s,
+                    "record": r,
+                    "excerpt": _matching_excerpt(r, query, terms),
+                    "memory_id": memory_id,
+                    "superseded_by": sorted(payload.get("superseded_by", {}).get(memory_id, [])),
+                })
+    out = _filter_search_records(out, source, min_trust, as_of, include_superseded)
+    normalized_as_of = _normalize_time(as_of, "as_of") if as_of is not None else None
+    out.sort(key=lambda x: _search_sort_key(x, normalized_as_of))
+    return out[:limit]
+
+
+def _supersession_chain(payload: dict, memory_id: str, direction: str) -> list[str]:
+    """Return sorted breadth-first relation context without revisiting nodes."""
+    records = {r.get("memory_id"): r for r in payload.get("records", [])}
+    if direction == "supersedes":
+        neighbours = lambda node: records.get(node, {}).get("metadata", {}).get("supersedes", [])
+    else:
+        neighbours = lambda node: payload.get("superseded_by", {}).get(node, [])
+    visited, queue = set(), [memory_id]
+    while queue:
+        node = queue.pop(0)
+        for target in sorted(neighbours(node)):
+            if target not in visited and target != memory_id:
+                visited.add(target)
+                queue.append(target)
+    return sorted(visited)
+
+
+def _explain_fields(record: dict, query: str, terms: list[str]) -> list[str]:
+    labels = []
+    normalized_query = " ".join(query.lower().split())
+    fields = [("title", record.get("title", ""), FIELD_WEIGHTS["title"])]
+    fields.extend((name, value, FIELD_WEIGHTS.get(name, 1)) for name, value in record.get("sections", {}).items())
+    for label, value, weight in fields:
+        normalized = " ".join(value.lower().split())
+        if normalized_query in normalized or any(term in _tokenize(normalized) for term in terms):
+            labels.append(f"{label}:{weight}")
+    return labels
 def _backup_corrupt_index():
     path = Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE
     if not path.exists(): return None
@@ -955,7 +1466,15 @@ def _backup_corrupt_index():
         backup = path.with_name(f"{stem.name}-{suffix}")
         suffix += 1
     os.replace(path, backup); return backup
-def cmd_memory_search(query, limit=10):
+def cmd_memory_search(
+    query,
+    limit=10,
+    source=None,
+    min_trust=None,
+    as_of=None,
+    include_superseded=False,
+    explain=False,
+):
     query = query.strip()
     if not query: safe_print("❌ search query must not be empty"); return 1
     if limit < 1: safe_print("❌ limit must be >= 1"); return 1
@@ -982,10 +1501,47 @@ def cmd_memory_search(query, limit=10):
         try: payload, warnings = _build_index_payload()
         except (OSError, ValueError) as exc: safe_print(f"❌ Memory search failed: {exc}"); return 1
         for warning in warnings: safe_print(f"⚠️  {warning}")
-    results = _search_records(payload, query, limit)
+    try:
+        results = _search_records(
+            payload,
+            query,
+            limit,
+            source=source,
+            min_trust=min_trust,
+            as_of=as_of,
+            include_superseded=include_superseded,
+        )
+    except (MetadataValidationError, ValueError, InvalidOperation) as exc:
+        safe_print(f"❌ invalid search filter: {exc}")
+        return 1
     if not results: safe_print(f"[NO_MATCH] query={query} sources={len(payload['records'])}"); return 0
+    terms = list(dict.fromkeys(_tokenize(query)))
+    normalized_as_of = _normalize_time(as_of, "as_of") if as_of is not None else None
     for i, result in enumerate(results, 1):
-        r = result["record"]; safe_print(f"[{i}] score={result['score']} kind={r['kind']} path={r['path']}"); safe_print(f"    title={r['title']}"); safe_print(f"    excerpt={result['excerpt']}")
+        r = result["record"]
+        safe_print(f"[{i}] score={result['score']} kind={r['kind']} path={r['path']}")
+        safe_print(f"    title={r['title']}")
+        safe_print(f"    excerpt={result['excerpt']}")
+        if result.get("superseded_by"):
+            safe_print(f"    superseded-by={','.join(result['superseded_by'])}")
+        if explain:
+            metadata = _result_metadata(result)
+            safe_print(
+                "    match=lexical "
+                f"fields={','.join(_explain_fields(r, query, terms)) or 'none'} "
+                f"metadata=schema:{metadata.get('schema_version')} "
+                f"memory_id:{metadata.get('memory_id')} "
+                f"source:{metadata.get('source') or 'unknown'} "
+                f"trust:{metadata.get('trust') or 'unknown'} "
+                f"valid_from:{metadata.get('valid_from') or 'unknown'} "
+                f"valid_to:{metadata.get('valid_to') or 'unknown'}"
+            )
+        if include_superseded:
+            memory_id = _result_metadata(result).get("memory_id", result.get("memory_id"))
+            supersedes = _supersession_chain(payload, memory_id, "supersedes")
+            superseded_by = _supersession_chain(payload, memory_id, "superseded_by")
+            safe_print(f"    supersedes-chain={','.join(supersedes) or 'none'}")
+            safe_print(f"    superseded-by-chain={','.join(superseded_by) or 'none'}")
     return 0
 
 def _render_index_markdown(payload, warnings):
@@ -1058,6 +1614,23 @@ def cmd_knowledge_check(strict: bool = False):
     if agents_path.exists():
         safe_print("ℹ️  AGENTS.md found; moss-mem treats it as read-only external context")
 
+    # Validate source metadata independently of the generated cache so strict
+    # checks still identify the offending file when the cache is stale or was
+    # never built.  Source bytes are read only here.
+    source_records = []
+    for index, path in enumerate(_discover_memory_sources()):
+        try:
+            source_records.append(_parse_memory_record(path, index))
+        except MetadataValidationError as exc:
+            warnings.append(f"invalid metadata in {path}: {exc}")
+        except (OSError, UnicodeError) as exc:
+            warnings.append(f"unreadable memory source {path}: {exc}")
+    if source_records:
+        try:
+            _build_supersession_graph(source_records)
+        except MetadataValidationError as exc:
+            warnings.append(f"invalid supersedes graph: {exc}")
+
     json_index = Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE
     markdown_index = Path(INDEX_CACHE_DIR) / INDEX_MD_FILE
     if not json_index.is_file():
@@ -1114,8 +1687,101 @@ def _yaml_scalar(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _render_v2_frontmatter(
+    *,
+    source: str | None = None,
+    trust: str | int | float | None = None,
+    recorded_at: str | None = None,
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    supersedes: str | None = None,
+    memory_id: str | None = None,
+) -> list[str]:
+    """Render canonical v2 fields in a stable order for new or promoted files."""
+    if recorded_at is None:
+        try:
+            recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        except TypeError:
+            # Keep compatibility with the fixed datetime shim used by legacy
+            # callers/tests, which only accepts the zero-argument form.
+            recorded_at = datetime.now().isoformat(timespec="seconds")
+            if not re.search(r"(?:Z|[+-]\d{2}:\d{2})$", recorded_at):
+                recorded_at += "+00:00"
+    normalized_source = _normalize_source(source)
+    normalized_trust = _normalize_trust(trust)
+    normalized_recorded = _normalize_time(recorded_at, "recorded_at")
+    normalized_from = _normalize_time(valid_from, "valid_from")
+    normalized_to = _normalize_time(valid_to, "valid_to")
+    if normalized_from and normalized_to and normalized_to <= normalized_from:
+        raise MetadataValidationError("valid_to must be later than valid_from")
+    normalized_supersedes = _normalize_supersedes(supersedes)
+    lines = [
+        f"schema_version: {SEMANTIC_SCHEMA_VERSION}",
+        f"memory_id: {memory_id or _new_memory_id()}",
+        f"recorded_at: {normalized_recorded}",
+    ]
+    if normalized_source is not None:
+        lines.append(f"source: {normalized_source}")
+    if normalized_trust is not None:
+        lines.append(f"trust: {normalized_trust}")
+    if normalized_from is not None:
+        lines.append(f"valid_from: {normalized_from}")
+    if normalized_to is not None:
+        lines.append(f"valid_to: {normalized_to}")
+    if normalized_supersedes:
+        lines.append(f"supersedes: {';'.join(normalized_supersedes)}")
+    return lines
+
+
+def _update_task_metadata(
+    task_file: str,
+    *,
+    source: str | None = None,
+    trust: str | int | float | None = None,
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    supersedes: str | None = None,
+) -> None:
+    """Promote a legacy task only when explicit v2 metadata is supplied."""
+    path = Path(task_file)
+    with _open(path) as handle:
+        content = handle.read()
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise MetadataValidationError(f"task file has no frontmatter: {task_file}")
+    try:
+        end = next(index for index in range(1, len(lines)) if lines[index].strip() == "---")
+    except StopIteration as exc:
+        raise MetadataValidationError(f"task frontmatter is unterminated: {task_file}") from exc
+    existing = {}
+    unknown = []
+    for line in lines[1:end]:
+        if ":" not in line:
+            unknown.append(line)
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip('"')
+        if key in {"schema_version", "memory_id", "recorded_at", "source", "trust", "valid_from", "valid_to", "supersedes"}:
+            existing[key] = value
+        else:
+            unknown.append(line)
+    merged = {
+        "source": source if source is not None else existing.get("source"),
+        "trust": trust if trust is not None else existing.get("trust"),
+        "recorded_at": existing.get("recorded_at"),
+        "valid_from": valid_from if valid_from is not None else existing.get("valid_from"),
+        "valid_to": valid_to if valid_to is not None else existing.get("valid_to"),
+        "supersedes": supersedes if supersedes is not None else existing.get("supersedes"),
+        "memory_id": existing.get("memory_id"),
+    }
+    v2_lines = _render_v2_frontmatter(**merged)
+    rewritten = lines[:1] + v2_lines + unknown + lines[end:]
+    _atomic_write_text(path, "\n".join(rewritten) + "\n")
+
+
 @locked_mutation("summary-capture")
-def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decisions: str = "", next_step: str = "", related: str = ""):
+def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decisions: str = "", next_step: str = "", related: str = "", trust: str | None = None, valid_from: str | None = None, valid_to: str | None = None, supersedes: str | None = None):
     """Capture a harness/session summary into .moss-mem/summaries/."""
     Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1131,10 +1797,18 @@ def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decis
     if not related_lines:
         related_lines.append("- <!-- none -->")
 
+    v2_fields = _render_v2_frontmatter(
+        source=source,
+        trust=trust,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        supersedes=supersedes,
+    )
+
     content = "\n".join([
         "---",
+        *v2_fields,
         f"topic: {_yaml_scalar(topic)}",
-        f"source: {_yaml_scalar(source)}",
         f"created: {_yaml_scalar(timestamp)}",
         "type: harness-summary",
         "---",
@@ -1761,24 +2435,58 @@ def _summary_month_key(path: Path) -> str:
     return mtime.strftime("%Y-%m")
 
 
-def _extract_summary_fields(content: str, path: Path) -> dict[str, str]:
+def _extract_summary_fields(content: str, path: Path) -> dict:
     sections = _extract_task_sections(content)
     topic = path.stem
     # frontmatter topic
     lines = content.splitlines()
+    frontmatter: dict[str, str] = {}
     if lines and lines[0].strip() == "---":
         for line in lines[1:]:
             if line.strip() == "---":
                 break
+            if ":" in line:
+                key, value = line.split(":", 1)
+                frontmatter[key.strip()] = value.strip().strip('"')
             if line.lower().startswith("topic:"):
                 topic = line.split(":", 1)[1].strip().strip('"') or topic
+    marker_metadata = None
+    for line in lines:
+        if "moss-mem-meta:" not in line:
+            continue
+        marker_metadata = _parse_digest_metadata_marker(line)
+        if marker_metadata is not None:
+            break
+    metadata = _parse_digest_metadata(marker_metadata, path) if marker_metadata is not None else _parse_memory_metadata(frontmatter, path)
     return {
         "topic": topic,
         "summary": sections.get("Summary", "").strip(),
         "decisions": sections.get("Decisions", "").strip(),
         "next_step": sections.get("Next Step", "").strip(),
         "source": sections.get("Source", "").strip(),
+        "metadata": metadata,
     }
+
+
+def _metadata_marker(metadata: dict) -> str | None:
+    """Render a compact, deterministic JSON marker for v2 summary metadata."""
+    if not metadata or metadata.get("legacy"):
+        return None
+    marker = {
+        "memory_id": metadata["memory_id"],
+        "schema_version": metadata["schema_version"],
+        "source": metadata.get("source"),
+        "trust": metadata.get("trust"),
+        "recorded_at": metadata.get("recorded_at"),
+        "valid_from": metadata.get("valid_from"),
+        "valid_to": metadata.get("valid_to"),
+        "supersedes": metadata.get("supersedes", []),
+    }
+    # Keep trust as a JSON number when it is canonical, matching the design
+    # example while preserving exact six-decimal semantics on re-parse.
+    if marker["trust"] is not None:
+        marker["trust"] = float(marker["trust"])
+    return "<!-- moss-mem-meta: " + json.dumps(marker, ensure_ascii=False, separators=(",", ":")) + " -->"
 
 
 def _compact_summaries(
@@ -1832,6 +2540,7 @@ def _compact_summaries(
             fields = _extract_summary_fields(content, src)
             source_hash = _sha256_path(src)
             marker = f"<!-- moss-mem-source: {src} sha256={source_hash} -->"
+            metadata_marker = _metadata_marker(fields.get("metadata", {}))
             block = [f"### {fields['topic']} (`{src.name}`)"]
             if fields["summary"] and fields["summary"] != "<!-- none -->":
                 block.append(f"**Summary:** {fields['summary']}")
@@ -1839,6 +2548,8 @@ def _compact_summaries(
                 block.append(f"**Decisions:** {fields['decisions']}")
             if fields["next_step"] and fields["next_step"] not in ("<!-- none -->", "<!-- pending -->"):
                 block.append(f"**Next Step:** {fields['next_step']}")
+            if metadata_marker:
+                block.append(metadata_marker)
             entry_specs.append((src, marker, "\n".join(block), source_hash))
         if not entry_specs:
             continue
@@ -2173,6 +2884,8 @@ def main():
     start_parser = subparsers.add_parser("start", help="Start a new task")
     start_parser.add_argument("--description", "-d", required=False, default="(待补)", help="Task description; defaults to placeholder you can fill in via update")
     start_parser.add_argument("--next-step", "-n", required=False, default="等待下一步指令", help="Next step instruction; defaults to placeholder you can fill in via update")
+    for option, help_text in (("--source", "Provenance source"), ("--trust", "Trust in [0,1]"), ("--valid-from", "Valid-time start"), ("--valid-to", "Valid-time end"), ("--supersedes", "Semicolon-separated IDs being superseded")):
+        start_parser.add_argument(option, default=None, help=help_text)
 
     update_parser = subparsers.add_parser("update", help="Update task progress")
     update_parser.add_argument("--description", "-d", required=True, help="Progress description")
@@ -2181,6 +2894,8 @@ def main():
     update_parser.add_argument("--last-action", "-l", default=None, help="Last action (writes to task file)")
     update_parser.add_argument("--key-decisions", "-k", default=None, help="Key decisions (writes to task file)")
     update_parser.add_argument("--landmines", "-m", default=None, help="Landmines (writes to task file)")
+    for option, help_text in (("--source", "Provenance source"), ("--trust", "Trust in [0,1]"), ("--valid-from", "Valid-time start"), ("--valid-to", "Valid-time end"), ("--supersedes", "Semicolon-separated IDs being superseded")):
+        update_parser.add_argument(option, default=None, help=help_text)
 
     complete_parser = subparsers.add_parser("complete", help="Complete current task")
     complete_parser.add_argument("--description", "-d", required=True, help="Completion description")
@@ -2205,6 +2920,11 @@ def main():
     memory_search_parser = subparsers.add_parser("memory-search", help="Search the local generated memory index")
     memory_search_parser.add_argument("query")
     memory_search_parser.add_argument("--limit", type=int, default=10)
+    memory_search_parser.add_argument("--source", default=None, help="Exact, case-sensitive provenance source")
+    memory_search_parser.add_argument("--min-trust", default=None, help="Minimum explicit trust in [0,1]")
+    memory_search_parser.add_argument("--as-of", default=None, help="UTC-normalized ISO valid-time snapshot")
+    memory_search_parser.add_argument("--include-superseded", action="store_true", help="Expand supersession chains in explain output")
+    memory_search_parser.add_argument("--explain", action="store_true", help="Show lexical fields and normalized metadata")
 
     knowledge_check_parser = subparsers.add_parser("knowledge-check", help="Validate moss-mem memory layout")
     knowledge_check_parser.add_argument("--strict", action="store_true", help="Fail when memory index warnings are present")
@@ -2216,6 +2936,10 @@ def main():
     summary_parser.add_argument("--decisions", default="", help="Key decisions captured in the summary")
     summary_parser.add_argument("--next-step", "-n", default="", help="Next concrete step")
     summary_parser.add_argument("--related", default="", help="Comma-separated related file paths")
+    summary_parser.add_argument("--trust", default=None, help="Trust in [0,1]")
+    summary_parser.add_argument("--valid-from", default=None, help="Valid-time start")
+    summary_parser.add_argument("--valid-to", default=None, help="Valid-time end")
+    summary_parser.add_argument("--supersedes", default=None, help="Semicolon-separated IDs being superseded")
 
     # ── v4: declarative state subcommand ──
     state_parser = subparsers.add_parser("state", help="Declarative state API (v4)")
@@ -2233,6 +2957,11 @@ def main():
     state_set_parser.add_argument("--last-action", "-l", default=None)
     state_set_parser.add_argument("--key-decisions", "-k", default=None)
     state_set_parser.add_argument("--landmines", "-m", default=None)
+    state_set_parser.add_argument("--source", default=None)
+    state_set_parser.add_argument("--trust", default=None)
+    state_set_parser.add_argument("--valid-from", default=None)
+    state_set_parser.add_argument("--valid-to", default=None)
+    state_set_parser.add_argument("--supersedes", default=None)
 
     state_commit_parser = state_subs.add_parser("commit", help="Snapshot current state to a new task file")
     state_commit_parser.add_argument("-m", "--message", required=True, help="One-line commit summary")
@@ -2302,12 +3031,15 @@ def main():
     if args.command == "init":
         cmd_init()
     elif args.command == "start":
-        cmd_start(args.description, args.next_step)
+        cmd_start(args.description, args.next_step, args.source, args.trust, args.valid_from, args.valid_to, args.supersedes)
     elif args.command == "update":
         cmd_update(args.description, args.next_step, args.status,
                 getattr(args, 'last_action', None),
                 getattr(args, 'key_decisions', None),
-                getattr(args, 'landmines', None))
+                getattr(args, 'landmines', None),
+                getattr(args, 'source', None), getattr(args, 'trust', None),
+                getattr(args, 'valid_from', None), getattr(args, 'valid_to', None),
+                getattr(args, 'supersedes', None))
     elif args.command == "complete":
         cmd_complete(args.description)
     elif args.command == "add-note":
@@ -2323,11 +3055,19 @@ def main():
     elif args.command == "knowledge-index":
         sys.exit(0 if cmd_knowledge_index() else 1)
     elif args.command == "memory-search":
-        sys.exit(cmd_memory_search(args.query, args.limit))
+        sys.exit(cmd_memory_search(
+            args.query,
+            args.limit,
+            args.source,
+            args.min_trust,
+            args.as_of,
+            args.include_superseded,
+            args.explain,
+        ))
     elif args.command == "knowledge-check":
         cmd_knowledge_check(getattr(args, 'strict', False))
     elif args.command == "summary-capture":
-        cmd_summary_capture(args.topic, args.summary, args.source, args.decisions, args.next_step, args.related)
+        cmd_summary_capture(args.topic, args.summary, args.source, args.decisions, args.next_step, args.related, args.trust, args.valid_from, args.valid_to, args.supersedes)
     elif args.command == "compact":
         sys.exit(cmd_compact(
             strategy=args.strategy,
@@ -2364,6 +3104,11 @@ def main():
                 "last_action": args.last_action,
                 "key_decisions": args.key_decisions,
                 "landmines": args.landmines,
+                "source": getattr(args, "source", None),
+                "trust": getattr(args, "trust", None),
+                "valid_from": getattr(args, "valid_from", None),
+                "valid_to": getattr(args, "valid_to", None),
+                "supersedes": getattr(args, "supersedes", None),
             }
             for pair in (args.pairs or []):
                 if "=" not in pair:
@@ -2384,7 +3129,10 @@ def main():
                 cmd_update(desc, nxt, st,
                           field_map.get("last_action"),
                           field_map.get("key_decisions"),
-                          field_map.get("landmines"))
+                          field_map.get("landmines"),
+                          field_map.get("source"), field_map.get("trust"),
+                          field_map.get("valid_from"), field_map.get("valid_to"),
+                          field_map.get("supersedes"))
         elif action == "commit":
             # Auto-init: same logic as `state set` — first commit on a fresh project
             # should not require a separate `state init` round-trip.

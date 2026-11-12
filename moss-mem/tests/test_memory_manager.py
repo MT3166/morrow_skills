@@ -290,6 +290,304 @@ class MemoryManagerCLITest(unittest.TestCase):
         memory = (self.project / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("**当前指针**：`N/A`", memory)
 
+    def test_schema_v2_metadata_normalizes_fields(self):
+        path = self.project / "task.md"
+        metadata = memory_manager._parse_memory_metadata({
+            "schema_version": "2",
+            "memory_id": "mem_0123456789abcdef0123456789abcdef",
+            "source": "  human:mt  ",
+            "trust": "0.900000",
+            "recorded_at": "2026-11-12T10:30:00-08:00",
+            "valid_from": "2026-11-01T00:00:00Z",
+            "valid_to": "2026-12-01T00:00:00+00:00",
+            "supersedes": "mem_b; mem_a; mem_b",
+        }, path)
+        self.assertEqual(metadata["schema_version"], 2)
+        self.assertEqual(metadata["memory_id"], "mem_0123456789abcdef0123456789abcdef")
+        self.assertEqual(metadata["source"], "human:mt")
+        self.assertEqual(metadata["trust"], "0.9")
+        self.assertEqual(metadata["recorded_at"], "2026-11-12T18:30:00+00:00")
+        self.assertEqual(metadata["valid_from"], "2026-11-01T00:00:00+00:00")
+        self.assertEqual(metadata["supersedes"], ["mem_a", "mem_b"])
+        self.assertFalse(metadata["legacy"])
+
+    def test_schema_v2_metadata_rejects_invalid_values(self):
+        path = self.project / "task.md"
+        valid = {
+            "schema_version": "2",
+            "memory_id": "mem_0123456789abcdef0123456789abcdef",
+        }
+        invalid = [
+            {"source": "bad\nsource"},
+            {"trust": "NaN"},
+            {"trust": "1e-2"},
+            {"trust": "1.0000001"},
+            {"recorded_at": "2026-11-12T10:30:00"},
+            {"valid_from": "2026-12-01T00:00:00Z", "valid_to": "2026-11-01T00:00:00Z"},
+        ]
+        for override in invalid:
+            with self.subTest(override=override):
+                with self.assertRaises(ValueError):
+                    memory_manager._parse_memory_metadata({**valid, **override}, path)
+
+    def test_schema_v2_metadata_uses_legacy_shape_and_virtual_id(self):
+        path = self.project / "legacy.md"
+        metadata = memory_manager._parse_memory_metadata({}, path)
+        self.assertEqual(metadata["schema_version"], 1)
+        self.assertTrue(metadata["legacy"])
+        self.assertTrue(metadata["memory_id"].startswith("legacy:"))
+        self.assertEqual(metadata["source"], None)
+        self.assertEqual(metadata["trust"], None)
+        self.assertEqual(metadata["supersedes"], [])
+
+    def test_schema_v2_memory_id_retries_collision(self):
+        first = "0" * 32
+        second = "1" * 32
+        with mock.patch.object(memory_manager.secrets, "token_hex", side_effect=[first, second]):
+            value = memory_manager._new_memory_id({f"mem_{first}"})
+        self.assertEqual(value, f"mem_{second}")
+
+    def test_start_writes_schema_v2_metadata_when_explicit(self):
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            memory_manager.cmd_start(
+                "v2 task", "next", source="human:mt", trust="0.8",
+                valid_from="2026-11-01T00:00:00Z",
+            )
+        finally:
+            os.chdir(previous)
+        task = next((self.project / ".moss-mem/tasks").glob("*.md"))
+        text = task.read_text(encoding="utf-8")
+        self.assertIn("schema_version: 2", text)
+        self.assertIn("source: human:mt", text)
+        self.assertIn("trust: 0.8", text)
+        self.assertIn("valid_from: 2026-11-01T00:00:00+00:00", text)
+        self.assertRegex(text, r"memory_id: mem_[0-9a-f]{32}")
+        self.assertRegex(text, r"recorded_at: 20[0-9]{2}-[0-9]{2}-[0-9]{2}T")
+
+    def test_summary_capture_writes_schema_v2_metadata(self):
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            memory_manager.cmd_summary_capture(
+                "v2 summary", "body", source="agent:codex", trust="1",
+                valid_to="2026-12-01T00:00:00Z",
+                supersedes="mem_b;mem_a;mem_b",
+            )
+        finally:
+            os.chdir(previous)
+        summary = next((self.project / ".moss-mem/summaries").glob("*.md"))
+        text = summary.read_text(encoding="utf-8")
+        self.assertIn("schema_version: 2", text)
+        self.assertIn("source: agent:codex", text)
+        self.assertIn("trust: 1.0", text)
+        self.assertIn("valid_to: 2026-12-01T00:00:00+00:00", text)
+        self.assertIn("supersedes: mem_a;mem_b", text)
+
+    def test_update_promotes_legacy_task_only_with_explicit_metadata(self):
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            tasks = self.project / ".moss-mem/tasks"
+            tasks.mkdir(parents=True)
+            task = tasks / "legacy.md"
+            task.write_text(
+                "---\nname: legacy\ncustom: keep-me\ntype: task\n---\n\n"
+                "# Legacy\n\n## Description\nold\n\n## Next Step\nnext\n\n"
+                "## Last Action\nold\n\n## Key Decisions\nold\n\n## Landmines\nnone\n",
+                encoding="utf-8",
+            )
+            (self.project / "MEMORY.md").write_text(
+                "# MEMORY\n\n## 状态机 [Strict]\n- **当前指针**：`%s`\n"
+                "- **最后状态**：🔧 In Progress\n\n## 下一步指令 [Strict]\n- next\n"
+                % task,
+                encoding="utf-8",
+            )
+            memory_manager.cmd_update(
+                "progress", "next", "🔧", source="tool:ci", trust="0.7",
+                last_action="updated",
+            )
+        finally:
+            os.chdir(previous)
+        text = task.read_text(encoding="utf-8")
+        self.assertIn("schema_version: 2", text)
+        self.assertIn("custom: keep-me", text)
+        self.assertIn("source: tool:ci", text)
+        self.assertIn("trust: 0.7", text)
+        self.assertRegex(text, r"memory_id: mem_[0-9a-f]{32}")
+
+    def test_index_record_contains_v2_metadata_and_legacy_shape(self):
+        v2 = self.project / "v2.md"
+        v2.write_text(
+            "---\nschema_version: 2\nmemory_id: mem_0123456789abcdef0123456789abcdef\n"
+            "source: human:mt\ntrust: 0.9\nrecorded_at: 2026-11-12T10:00:00Z\n---\n\n"
+            "# V2\n\n## Summary\nnew\n",
+            encoding="utf-8",
+        )
+        legacy = self.project / "legacy.md"
+        legacy.write_text("# Legacy\n\n## Summary\nold\n", encoding="utf-8")
+        v2_record = memory_manager._parse_memory_record(v2, 0)
+        legacy_record = memory_manager._parse_memory_record(legacy, 1)
+        self.assertEqual(v2_record["schema_version"], 2)
+        self.assertEqual(v2_record["metadata"]["source"], "human:mt")
+        self.assertEqual(legacy_record["schema_version"], 1)
+        self.assertTrue(legacy_record["metadata"]["legacy"])
+        self.assertIsNone(legacy_record["metadata"]["trust"])
+
+    def test_supersession_graph_supports_multiple_superseders_and_rejects_cycles(self):
+        records = [
+            {"memory_id": "mem_" + "a" * 32, "metadata": {"supersedes": []}},
+            {"memory_id": "mem_" + "b" * 32, "metadata": {"supersedes": ["mem_" + "a" * 32]}},
+            {"memory_id": "mem_" + "c" * 32, "metadata": {"supersedes": ["mem_" + "a" * 32]}},
+        ]
+        graph = memory_manager._build_supersession_graph(records)
+        self.assertEqual(graph["mem_" + "a" * 32], ["mem_" + "b" * 32, "mem_" + "c" * 32])
+        records[0]["metadata"]["supersedes"] = ["mem_" + "b" * 32]
+        with self.assertRaises(ValueError):
+            memory_manager._build_supersession_graph(records)
+
+    def test_digest_metadata_marker_round_trips(self):
+        marker = (
+            '<!-- moss-mem-meta: {"memory_id":"mem_0123456789abcdef0123456789abcdef",'
+            '"schema_version":2,"source":"human:mt","trust":"0.9",'
+            '"recorded_at":"2026-11-12T10:00:00+00:00","valid_from":null,'
+            '"valid_to":null,"supersedes":[]} -->'
+        )
+        parsed = memory_manager._parse_digest_metadata_marker(marker)
+        self.assertEqual(parsed["memory_id"], "mem_0123456789abcdef0123456789abcdef")
+        self.assertEqual(parsed["supersedes"], [])
+
+    def test_search_metadata_filters_are_inclusive_and_unknown_safe(self):
+        old_id = "mem_" + "a" * 32
+        new_id = "mem_" + "b" * 32
+        legacy_id = "legacy:" + "c" * 64
+        def record(rid, memory_id, trust, valid_from=None, valid_to=None, source="human:mt"):
+            metadata = {
+                "schema_version": 2 if memory_id.startswith("mem_") else 1,
+                "memory_id": memory_id,
+                "source": source if memory_id.startswith("mem_") else None,
+                "trust": trust,
+                "recorded_at": "2026-11-01T00:00:00+00:00" if memory_id.startswith("mem_") else None,
+                "valid_from": valid_from,
+                "valid_to": valid_to,
+                "supersedes": [],
+                "legacy": not memory_id.startswith("mem_"),
+            }
+            return {
+                "id": rid, "memory_id": memory_id, "schema_version": metadata["schema_version"],
+                "title": "Cookie", "kind": "task", "created": "", "mtime_ns": rid,
+                "sections": {"Summary": "cookie policy"}, "preview": "cookie policy",
+                "metadata": metadata,
+            }
+        payload = {
+            "records": [
+                record(1, old_id, "0.8", "2026-11-01T00:00:00+00:00", "2026-11-15T00:00:00+00:00"),
+                record(2, new_id, "0.9", "2026-11-15T00:00:00+00:00"),
+                record(3, legacy_id, None),
+            ],
+            "inverted_terms": {"cookie": [1, 2, 3], "policy": [1, 2, 3]},
+            "superseded_by": {old_id: [new_id], new_id: [], legacy_id: []},
+        }
+        at_boundary = memory_manager._search_records(
+            payload, "cookie", 10, source="human:mt", min_trust="0.9",
+            as_of="2026-11-15T00:00:00Z", include_superseded=True,
+        )
+        self.assertEqual([item["memory_id"] for item in at_boundary], [new_id])
+        self.assertEqual(
+            [item["memory_id"] for item in memory_manager._search_records(payload, "cookie", 10, as_of="2026-11-10T00:00:00Z")],
+            [old_id],
+        )
+
+    def test_search_explain_includes_relation_context_and_metadata(self):
+        old_id = "mem_" + "a" * 32
+        new_id = "mem_" + "b" * 32
+        base = {
+            "schema_version": 2, "source": "human:mt", "trust": "0.9",
+            "recorded_at": "2026-11-01T00:00:00+00:00", "valid_from": None,
+            "valid_to": None, "legacy": False,
+        }
+        old = {"id": 1, "memory_id": old_id, "schema_version": 2, "title": "Old", "kind": "task", "created": "", "mtime_ns": 1, "sections": {"Summary": "cookie"}, "preview": "cookie", "metadata": {**base, "memory_id": old_id, "supersedes": []}}
+        new = {"id": 2, "memory_id": new_id, "schema_version": 2, "title": "New", "kind": "task", "created": "", "mtime_ns": 2, "sections": {"Summary": "cookie"}, "preview": "cookie", "metadata": {**base, "memory_id": new_id, "supersedes": [old_id]}}
+        payload = {"records": [old, new], "inverted_terms": {"cookie": [1, 2]}, "superseded_by": {old_id: [new_id], new_id: []}}
+        results = memory_manager._search_records(payload, "cookie", 10)
+        self.assertEqual(results[0]["memory_id"], new_id)
+        old_result = next(item for item in results if item["memory_id"] == old_id)
+        self.assertEqual(old_result["superseded_by"], [new_id])
+        self.assertEqual(memory_manager._supersession_chain(payload, new_id, "supersedes"), [old_id])
+
+    def test_memory_search_help_exposes_schema_v2_filters(self):
+        result = self.run_cli("memory-search", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        for flag in ("--source", "--min-trust", "--as-of", "--include-superseded", "--explain"):
+            self.assertIn(flag, result.stdout)
+
+    def test_compact_summary_preserves_v2_metadata_marker(self):
+        source = self._write_summary(
+            "20260101-100000-v2.md",
+            "---\nschema_version: 2\n"
+            "memory_id: mem_0123456789abcdef0123456789abcdef\n"
+            "source: human:mt\ntrust: 0.9\nrecorded_at: 2026-11-12T10:00:00Z\n"
+            "---\n\n# Summary\n\n## Summary\nbody\n",
+        )
+        self._write_summary(
+            "20260720-100000-recent.md",
+            "---\ntopic: recent\n---\n\n# Summary\n\n## Summary\nrecent\n",
+            mtime=1_800_000_000,
+        )
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            result = memory_manager.cmd_compact(scope="summaries", keep_recent=1, yes=True)
+        finally:
+            os.chdir(previous)
+        self.assertEqual(result, 0)
+        digest = self.project / ".moss-mem/summaries/digest-2026-01.md"
+        text = digest.read_text(encoding="utf-8")
+        self.assertIn("moss-mem-meta:", text)
+        self.assertIn("mem_0123456789abcdef0123456789abcdef", text)
+        self.assertFalse(source.exists())
+
+    def test_multi_topic_digest_indexes_each_v2_metadata_marker(self):
+        digest = self.project / ".moss-mem/summaries/digest-2026-01.md"
+        digest.parent.mkdir(parents=True)
+        digest.write_text(
+            "# Summary Digest 2026-01\n\n"
+            "### first (`one.md`)\n**Summary:** alpha cookie\n"
+            "<!-- moss-mem-meta: {\"memory_id\":\"mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"schema_version\":2,\"source\":\"one\",\"trust\":0.8,\"recorded_at\":\"2026-01-01T00:00:00+00:00\",\"valid_from\":null,\"valid_to\":null,\"supersedes\":[]} -->\n\n"
+            "### second (`two.md`)\n**Summary:** beta cookie\n"
+            "<!-- moss-mem-meta: {\"memory_id\":\"mem_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"schema_version\":2,\"source\":\"two\",\"trust\":0.9,\"recorded_at\":\"2026-01-02T00:00:00+00:00\",\"valid_from\":null,\"valid_to\":null,\"supersedes\":[]} -->\n",
+            encoding="utf-8",
+        )
+        (self.project / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            payload, _ = memory_manager._build_index_payload()
+        finally:
+            os.chdir(previous)
+        digest_records = [record for record in payload["records"] if record["path"] == str(digest.relative_to(self.project))]
+        self.assertEqual({record["memory_id"] for record in digest_records}, {"mem_" + "a" * 32, "mem_" + "b" * 32})
+
+    def test_index_rejects_duplicate_v2_memory_ids(self):
+        tasks = self.project / ".moss-mem/tasks"
+        tasks.mkdir(parents=True)
+        first = tasks / "first.md"
+        second = tasks / "second.md"
+        header = (
+            "---\nschema_version: 2\nmemory_id: mem_0123456789abcdef0123456789abcdef\n"
+            "recorded_at: 2026-11-12T10:00:00Z\n---\n\n"
+        )
+        first.write_text(header + "# First\n", encoding="utf-8")
+        second.write_text(header + "# Second\n", encoding="utf-8")
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            with self.assertRaises(ValueError):
+                memory_manager._build_index_payload()
+        finally:
+            os.chdir(previous)
+
     def test_all_writer_commands_use_shared_mutation_lock(self):
         previous = Path.cwd()
         try:
@@ -760,7 +1058,7 @@ class MemoryManagerCLITest(unittest.TestCase):
         json_path = self.project / ".moss-mem/index-cache/memory-index.json"
         md_path = self.project / ".moss-mem/index-cache/memory-index.md"
         payload = json.loads(json_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(len(payload["records"]), 4)
         self.assertEqual(
             {record["kind"] for record in payload["records"]},

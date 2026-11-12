@@ -11,7 +11,7 @@ description: >-
   knowledge-index, knowledge-check, compact memory, compact archive, compact
   summaries, multi-scope compact, MD cleanup, lifecycle compact, add note,
   summary capture, threshold nudge.
-version: "6.0.1"
+version: "6.1.0"
 ---
 
 # moss-mem — Project memory across sessions
@@ -80,7 +80,43 @@ task files, and summaries. If the index is missing, corrupt, or stale it first
 attempts one `knowledge-index` rebuild. Only when rebuilding fails or the
 rebuilt index still cannot load does it emit `[INDEX-FALLBACK]` and search
 source Markdown directly. Do not edit generated files.
-`knowledge-check [--strict]` validates paths and index layout.
+
+### Schema v2 metadata
+
+New task and summary records carry optional, validated frontmatter fields:
+
+| Field | Meaning |
+|---|---|
+| `memory_id` | Stable `mem_` plus 32 lowercase hex identifier. |
+| `schema_version` | `2` for semantic records; old files remain readable as `1`. |
+| `source` | Exact, case-sensitive provenance label. |
+| `trust` | Explicit decimal in `[0,1]`; missing means unknown, never zero. |
+| `recorded_at` | Transaction time, timezone-bearing ISO-8601. |
+| `valid_from` / `valid_to` | Half-open valid interval `[from,to)`. |
+| `supersedes` | Semicolon-separated IDs explicitly replaced by this record. |
+
+Legacy Markdown is never rewritten by indexing. It receives a deterministic
+read-only `legacy:<sha256>` virtual ID and participates in default searches.
+Supersession preserves the old file; it only adds an auditable relation.
+Digest compaction keeps a JSON `moss-mem-meta` marker for each v2 source.
+
+Search can apply deterministic metadata filters after lexical matching:
+
+```bash
+python3 {base}/scripts/memory_manager.py memory-search "cookie" \
+  --source human:mt --min-trust 0.8 \
+  --as-of 2026-11-12T12:00:00Z \
+  --include-superseded --explain
+```
+
+`--source` is exact and case-sensitive. `--min-trust` includes its boundary
+and excludes unknown trust. `--as-of` uses the half-open interval and excludes
+records with no valid-time bounds. `--include-superseded` expands relation
+context in explain output; default results still retain superseded history.
+`knowledge-check [--strict]` validates paths, index layout, Schema v2 metadata,
+duplicate IDs, valid intervals, dangling supersedes, and relation cycles.
+Strict failures identify the record/field to repair and never rewrite source
+Markdown. Non-strict checks may warn while legacy records remain searchable.
 
 ## State Operations
 
