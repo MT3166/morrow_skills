@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +17,21 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_manager.py"
 SPEC = importlib.util.spec_from_file_location("memory_manager", SCRIPT)
 memory_manager = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(memory_manager)
+
+
+def _mrr_at_k(results, relevance, k=3):
+    for index, result in enumerate(results[:k], 1):
+        if relevance.get(result["memory_id"], 0) > 0:
+            return 1.0 / index
+    return 0.0
+
+
+def _ndcg_at_k(results, relevance, k=3):
+    gains = [relevance.get(result["memory_id"], 0) for result in results[:k]]
+    dcg = sum((2 ** grade - 1) / math.log2(index + 2) for index, grade in enumerate(gains))
+    ideal = sorted(relevance.values(), reverse=True)[:k]
+    idcg = sum((2 ** grade - 1) / math.log2(index + 2) for index, grade in enumerate(ideal))
+    return dcg / idcg if idcg else 0.0
 
 
 class MemoryManagerCLITest(unittest.TestCase):
@@ -516,11 +532,171 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertEqual(old_result["superseded_by"], [new_id])
         self.assertEqual(memory_manager._supersession_chain(payload, new_id, "supersedes"), [old_id])
 
+    def test_retrieval_field_map_concatenates_sections_and_buckets_unknowns(self):
+        record = {
+            "title": "Cookie Policy",
+            "sections": {
+                "Summary": ["first cookie", "second policy"],
+                "Key Decisions": "choose secure cookie",
+                "Scratch": "opaque note",
+            },
+        }
+        fields = memory_manager._canonical_retrieval_fields(record)
+        self.assertEqual(list(fields), ["title", "Summary", "Key Decisions", "__other__"])
+        self.assertEqual(fields["title"], ["cookie", "policy"])
+        self.assertEqual(fields["Summary"], ["first", "cookie", "second", "policy"])
+        self.assertEqual(fields["__other__"], ["opaque", "note"])
+        self.assertEqual(memory_manager._RETRIEVAL_FIELD_BOOSTS["title"], 3.0)
+
+    def test_search_golden_fixture_has_fixed_queries_and_expected_orders(self):
+        fixture = Path(__file__).parent / "fixtures" / "search-golden.json"
+        data = json.loads(fixture.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(data), 20)
+        for case in data:
+            self.assertIn("query", case)
+            self.assertIn("relevance", case)
+            self.assertIn("expected_bm25_top", case)
+            self.assertIn("expected_legacy_top", case)
+            self.assertTrue(all(isinstance(value, int) and 0 <= value <= 2 for value in case["relevance"].values()))
+
+    def test_search_golden_corpus_matches_bm25_and_legacy_orders(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "search-golden.json").read_text(encoding="utf-8"))
+        records = []
+        for index, case in enumerate(fixture, 1):
+            memory_id = next(iter(case["relevance"]))
+            metadata = {"schema_version": 2, "memory_id": memory_id, "source": "golden", "trust": "0.5", "recorded_at": "2026-11-01T00:00:00+00:00", "valid_from": None, "valid_to": None, "supersedes": [], "legacy": False}
+            records.append({"id": index, "memory_id": memory_id, "schema_version": 2, "path": f"golden/{index}.md", "kind": "task", "title": case["query"], "created": "", "mtime_ns": index, "sections": {"Summary": case["query"]}, "preview": case["query"], "metadata": metadata})
+        distractor_metadata = {"schema_version": 2, "memory_id": "mem_ffffffffffffffffffffffffffffffff", "source": "golden", "trust": "0.5", "recorded_at": "2026-11-01T00:00:00+00:00", "valid_from": None, "valid_to": None, "supersedes": [], "legacy": False}
+        records.extend([
+            {"id": 1001, "memory_id": "mem_ffffffffffffffffffffffffffffffff", "schema_version": 2, "path": "golden/distractor-summary.md", "kind": "summary", "title": "Archive note", "created": "", "mtime_ns": 1001, "sections": {"Summary": "cookie policy " + ("historical noise " * 40)}, "preview": "cookie policy", "metadata": distractor_metadata},
+            {"id": 1002, "memory_id": "mem_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "schema_version": 2, "path": "golden/distractor-title.md", "kind": "task", "title": "Cookie", "created": "", "mtime_ns": 1002, "sections": {"Summary": "policy " + ("old note " * 40)}, "preview": "policy", "metadata": {**distractor_metadata, "memory_id": "mem_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}},
+        ])
+        inverted = {}
+        for record in records:
+            for term in set(memory_manager._tokenize(record["title"] + " " + record["sections"]["Summary"])):
+                inverted.setdefault(term, []).append(record["id"])
+        payload = {"records": records, "inverted_terms": inverted, "superseded_by": {record["memory_id"]: [] for record in records}}
+        payload["retrieval_stats"] = memory_manager._build_retrieval_stats(records, inverted)
+        mrr_values, ndcg_values = [], []
+        for case in fixture:
+            bm25 = memory_manager._search_records(payload, case["query"], 3, rank="bm25f")
+            legacy = memory_manager._search_records(payload, case["query"], 3, rank="legacy")
+            self.assertEqual([item["memory_id"] for item in bm25[:len(case["expected_bm25_top"])]], case["expected_bm25_top"])
+            self.assertEqual([item["memory_id"] for item in legacy[:len(case["expected_legacy_top"])]], case["expected_legacy_top"])
+            mrr_values.append(_mrr_at_k(bm25, case["relevance"]))
+            ndcg_values.append(_ndcg_at_k(bm25, case["relevance"]))
+        self.assertGreaterEqual(sum(mrr_values) / len(mrr_values), 0.95)
+        self.assertGreaterEqual(sum(ndcg_values) / len(ndcg_values), 0.95)
+
+    def test_skill_documents_rank_modes_and_schema3_stats(self):
+        skill = (Path(__file__).parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("--rank", skill)
+        self.assertIn("retrieval_stats", skill)
+
+    def test_retrieval_stats_schema3_has_integer_lengths_and_fingerprint(self):
+        records = [
+            {"title": "Cookie", "sections": {"Summary": "cookie policy"}, "id": 1},
+            {"title": "", "sections": {}, "id": 2},
+        ]
+        inverted = {"cookie": [1], "policy": [1]}
+        stats = memory_manager._build_retrieval_stats(records, inverted)
+        self.assertEqual(stats["scorer"], "bm25f-v1")
+        self.assertEqual(stats["doc_count"], 2)
+        self.assertIsInstance(stats["fields"]["title"]["avg_len_milli"], int)
+        self.assertEqual(stats["doc_freq"], {"cookie": 1, "policy": 1})
+        self.assertRegex(stats["stats_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            stats["stats_fingerprint"],
+            memory_manager._retrieval_stats_fingerprint({k: v for k, v in stats.items() if k != "stats_fingerprint"}),
+        )
+
+    def test_index_payload_writes_and_validates_dual_schema3_versions(self):
+        self._write_index_fixture()
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            payload, _ = memory_manager._build_index_payload()
+            self.assertIsNone(memory_manager._index_problem(payload))
+            payload["index_schema_version"] = 2
+            self.assertIn("schema", memory_manager._index_problem(payload))
+            payload["index_schema_version"] = 3
+        finally:
+            os.chdir(previous)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["index_schema_version"], 3)
+
+    def test_schema2_payload_is_reported_as_stale_for_rebuild(self):
+        payload = {"schema_version": 2, "sources": {}, "records": [], "inverted_terms": {}}
+        self.assertIn("schema", memory_manager._index_problem(payload))
+
+    def test_bm25f_scoring_uses_idf_length_norm_phrase_and_quantization(self):
+        records = [
+            {"id": 1, "title": "cookie policy", "sections": {"Summary": "cookie cookie"}, "preview": ""},
+            {"id": 2, "title": "other", "sections": {"Summary": "cookie"}, "preview": ""},
+        ]
+        inverted = {"cookie": [1, 2], "policy": [1]}
+        stats = memory_manager._build_retrieval_stats(records, inverted)
+        scored = memory_manager._bm25f_score_record(records[0], ["cookie", "policy"], stats)
+        self.assertGreater(scored["score_raw"], 0)
+        self.assertEqual(scored["score_milli"], int(scored["score_raw"] * 1000 + 0.5))
+        self.assertEqual(scored["phrase_bonus"], 0.25 * min(max(scored["term_score_sum"], 1), 8))
+        self.assertTrue(all("field" in item and "idf" in item for item in scored["contributions"]))
+        expected_idf = __import__("math").log1p((2 - 2 + 0.5) / (2 + 0.5))
+        self.assertAlmostEqual(scored["contributions"][0]["idf"], expected_idf, places=6)
+
+    def test_bm25f_requires_all_query_terms_for_phrase_bonus_and_legacy_rank(self):
+        record = {"id": 1, "memory_id": "legacy:x", "title": "cookie", "kind": "task", "created": "", "mtime_ns": 1, "sections": {"Summary": "policy"}, "preview": "cookie policy", "metadata": {"schema_version": 1, "memory_id": "legacy:x", "source": None, "trust": None, "recorded_at": None, "valid_from": None, "valid_to": None, "supersedes": [], "legacy": True}}
+        stats = memory_manager._build_retrieval_stats([record], {"cookie": [1], "policy": [1]})
+        partial = memory_manager._bm25f_score_record(record, ["cookie", "missing"], stats)
+        self.assertEqual(partial["phrase_bonus"], 0)
+        payload = {"records": [record], "inverted_terms": {"cookie": [1], "policy": [1]}, "superseded_by": {"legacy:x": []}, "retrieval_stats": stats}
+        legacy = memory_manager._search_records(payload, "cookie", 10, rank="legacy")
+        self.assertEqual(len(legacy), 1)
+
     def test_memory_search_help_exposes_schema_v2_filters(self):
         result = self.run_cli("memory-search", "--help")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         for flag in ("--source", "--min-trust", "--as-of", "--include-superseded", "--explain"):
             self.assertIn(flag, result.stdout)
+
+    def test_memory_search_rank_modes_and_bm25_explain_output(self):
+        self._write_index_fixture()
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        bm25 = self.run_cli("memory-search", "token refresh race", "--explain")
+        self.assertEqual(bm25.returncode, 0, bm25.stderr + bm25.stdout)
+        self.assertIn("scorer=bm25f-v1", bm25.stdout)
+        self.assertIn("term=token", bm25.stdout)
+        self.assertIn("phrase_bonus=", bm25.stdout)
+        self.assertIn("final_tiebreak=", bm25.stdout)
+        partial = self.run_cli("memory-search", "token absent-term", "--explain")
+        self.assertEqual(partial.returncode, 0, partial.stderr + partial.stdout)
+        self.assertIn("term=absent field=none tf=0", partial.stdout)
+        legacy = self.run_cli("memory-search", "token refresh race", "--rank", "legacy", "--explain")
+        self.assertEqual(legacy.returncode, 0, legacy.stderr + legacy.stdout)
+        self.assertIn("scorer=legacy-v1", legacy.stdout)
+        invalid = self.run_cli("memory-search", "token", "--rank", "invalid")
+        self.assertNotEqual(invalid.returncode, 0)
+
+    def test_bm25_explain_reports_active_validity_tiebreak(self):
+        tasks = self.project / ".moss-mem/tasks"
+        tasks.mkdir(parents=True)
+        (self.project / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+        (self.project / ".moss-mem/tasks/MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8")
+        (tasks / "active.md").write_text(
+            "---\nschema_version: 2\nmemory_id: mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "recorded_at: 2026-11-01T00:00:00Z\nvalid_from: 2026-11-01T00:00:00Z\n"
+            "valid_to: 2026-12-01T00:00:00Z\n---\n# Active\n\n## Summary\nneedle\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        result = self.run_cli("memory-search", "needle", "--as-of", "2026-11-15T00:00:00Z", "--explain")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("final_tiebreak=validity:active", result.stdout)
+
+    def test_section_named_title_is_retained_as_other_retrieval_text(self):
+        fields = memory_manager._canonical_retrieval_fields({"title": "Frontmatter", "sections": {"title": "section needle"}})
+        self.assertEqual(fields["title"], ["frontmatter"])
+        self.assertEqual(fields["__other__"], ["section", "needle"])
 
     def test_compact_summary_preserves_v2_metadata_marker(self):
         source = self._write_summary(
@@ -925,6 +1101,19 @@ class MemoryManagerCLITest(unittest.TestCase):
         finally:
             os.chdir(previous)
 
+    def test_index_problem_rejects_inverted_reference_without_term_match(self):
+        self._write_index_fixture()
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        previous = Path.cwd()
+        try:
+            os.chdir(self.project)
+            payload = memory_manager._load_index_payload()
+            record_id = payload["records"][0]["id"]
+            payload["inverted_terms"]["injected-term"] = [record_id]
+            self.assertIn("inverted", memory_manager._index_problem(payload))
+        finally:
+            os.chdir(previous)
+
     def test_index_build_retries_when_source_metadata_changes(self):
         self._write_index_fixture()
         previous = Path.cwd()
@@ -1058,7 +1247,8 @@ class MemoryManagerCLITest(unittest.TestCase):
         json_path = self.project / ".moss-mem/index-cache/memory-index.json"
         md_path = self.project / ".moss-mem/index-cache/memory-index.md"
         payload = json.loads(json_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["index_schema_version"], 3)
         self.assertEqual(len(payload["records"]), 4)
         self.assertEqual(
             {record["kind"] for record in payload["records"]},

@@ -118,6 +118,22 @@ duplicate IDs, valid intervals, dangling supersedes, and relation cycles.
 Strict failures identify the record/field to repair and never rewrite source
 Markdown. Non-strict checks may warn while legacy records remain searchable.
 
+P2 retrieval uses a deterministic BM25F-style scorer by default:
+
+```bash
+python3 {base}/scripts/memory_manager.py memory-search "refresh race" \
+  --rank bm25f --explain
+python3 {base}/scripts/memory_manager.py memory-search "refresh race" \
+  --rank legacy
+```
+
+`--rank bm25f` is the default and reports fixed-point lexical scores with
+field-level explain contributions. `--rank legacy` is the P1 scorer fallback.
+The index stores rebuildable `retrieval_stats` under Schema 3; a missing,
+stale, or mismatched stats block triggers a normal `knowledge-index` rebuild.
+The top-level index schema version is separate from each record's semantic
+`schema_version`; source Markdown remains unchanged during migration.
+
 ## State Operations
 
 `state set k=v ...` is the only field-assignment verb; aliases `start`, `update`,

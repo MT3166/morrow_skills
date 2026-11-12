@@ -19,6 +19,7 @@ import shutil
 import signal
 import sys
 import json
+import math
 import re
 import subprocess
 from collections import defaultdict
@@ -121,7 +122,7 @@ SUMMARIES_DIR = ".moss-mem/summaries"
 INDEX_CACHE_DIR = ".moss-mem/index-cache"
 ARCHIVE_FILE = "MEMORY_ARCHIVE.md"
 OLD_TASKS_DIR = "MEMORY_TASKS"  # legacy — migrated on init
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 INDEX_JSON_FILE = "memory-index.json"
 INDEX_MD_FILE = "memory-index.md"
 TRANSACTIONS_DIR = ".moss-mem/transactions"
@@ -962,12 +963,20 @@ def _parse_memory_record(path, record_id):
             title = line[2:].strip()
         if line.startswith("## "):
             if current is not None:
-                sections[current] = "\n".join(buffer).strip()
+                value = "\n".join(buffer).strip()
+                if current in sections and value:
+                    sections[current] = f"{sections[current]}\n{value}"
+                else:
+                    sections[current] = value
             current, buffer = line[3:].strip(), []
         elif current is not None:
             buffer.append(line)
     if current is not None:
-        sections[current] = "\n".join(buffer).strip()
+        value = "\n".join(buffer).strip()
+        if current in sections and value:
+            sections[current] = f"{sections[current]}\n{value}"
+        else:
+            sections[current] = value
     created = frontmatter.get("created", "") or (sections.get("Created", "").splitlines()[0].strip() if sections.get("Created") else "")
     preview_source = next((sections[name] for name in ("Description", "Summary", "Key Decisions", "Decisions", "Next Step") if sections.get(name)), title)
     if frontmatter:
@@ -1156,6 +1165,7 @@ def _build_index_payload():
             raise OSError("memory sources changed during index build")
         payload = {
             "schema_version": INDEX_SCHEMA_VERSION,
+            "index_schema_version": INDEX_SCHEMA_VERSION,
             "build_id": f"{get_timestamp()}-{secrets.token_hex(8)}",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "sources": {r["path"]: r["mtime_ns"] for r in records},
@@ -1163,11 +1173,84 @@ def _build_index_payload():
             "superseded_by": superseded_by,
             "inverted_terms": {t: sorted(ids) for t, ids in sorted(inverted.items())},
         }
+        payload["retrieval_stats"] = _build_retrieval_stats(records, payload["inverted_terms"])
         return payload, warnings
     raise OSError("memory sources changed during index build")
 
 
 FIELD_WEIGHTS = {"title": 8, "Description": 5, "Summary": 5, "Decisions": 5, "Key Decisions": 5, "Landmines": 5, "Related Files": 3, "Next Step": 3}
+
+_RETRIEVAL_FIELD_BOOSTS = {
+    "title": 3.0,
+    "Description": 2.0,
+    "Summary": 2.0,
+    "Decisions": 2.5,
+    "Key Decisions": 2.5,
+    "Next Step": 1.5,
+    "Related Files": 1.0,
+    "Landmines": 1.0,
+    "__other__": 0.5,
+}
+
+
+def _canonical_retrieval_fields(record: dict) -> dict[str, list[str]]:
+    """Return deterministic token lists for BM25F canonical fields."""
+    sections = record.get("sections", {}) or {}
+    output: dict[str, list[str]] = {}
+    title = record.get("title", "")
+    if title:
+        output["title"] = _tokenize(str(title))
+    other: list[str] = []
+    for field in _RETRIEVAL_FIELD_BOOSTS:
+        if field in {"title", "__other__"} or field not in sections:
+            continue
+        value = sections[field]
+        if isinstance(value, (list, tuple)):
+            value = "\n".join(str(item) for item in value)
+        output[field] = _tokenize(str(value))
+    for field, value in sections.items():
+        if field in _RETRIEVAL_FIELD_BOOSTS and field != "title":
+            continue
+        if isinstance(value, (list, tuple)):
+            value = "\n".join(str(item) for item in value)
+        other.extend(_tokenize(str(value)))
+    if other:
+        output["__other__"] = other
+    return output
+
+
+def _retrieval_stats_fingerprint(stats_without_fingerprint: dict) -> str:
+    canonical = json.dumps(
+        stats_without_fingerprint,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _build_retrieval_stats(records: list[dict], inverted_terms: dict[str, list[int]]) -> dict:
+    doc_count = len(records)
+    lengths = {field: 0 for field in _RETRIEVAL_FIELD_BOOSTS}
+    for record in records:
+        fields = _canonical_retrieval_fields(record)
+        for field in lengths:
+            lengths[field] += len(fields.get(field, []))
+    fields_stats = {
+        field: {"avg_len_milli": math.floor((total * 1000 / doc_count) + 0.5) if doc_count else 0}
+        for field, total in lengths.items()
+    }
+    stats = {
+        "scorer": "bm25f-v1",
+        "doc_count": doc_count,
+        "fields": fields_stats,
+        "doc_freq": {term: len(set(refs)) for term, refs in sorted(inverted_terms.items())},
+    }
+    stats["stats_fingerprint"] = _retrieval_stats_fingerprint(stats)
+    return stats
+
+
 def _load_index_payload():
     with _open(Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE) as handle: return json.load(handle)
 
@@ -1227,6 +1310,7 @@ def _validate_index_metadata(record: dict) -> str | None:
 def _index_problem(payload):
     if not isinstance(payload, dict): return "schema mismatch"
     if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
+    if payload.get("index_schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
     if not isinstance(payload.get("build_id"), str) or not payload["build_id"].strip(): return "schema mismatch"
     if not isinstance(payload.get("generated_at"), str) or not payload["generated_at"].strip(): return "schema mismatch"
     indexed = payload.get("sources")
@@ -1265,6 +1349,22 @@ def _index_problem(payload):
             refs = inverted.get(term)
             if not isinstance(refs, list) or record["id"] not in refs:
                 return "inverted index incomplete"
+    by_record_id = {record["id"]: record for record in records}
+    for term, refs in inverted.items():
+        for record_id in refs:
+            record = by_record_id[record_id]
+            record_terms = set(_tokenize(" ".join([record["title"], *record["sections"].values()])))
+            if term not in record_terms:
+                return "inverted index term mismatch"
+    retrieval_stats = payload.get("retrieval_stats")
+    if not isinstance(retrieval_stats, dict):
+        return "retrieval stats missing"
+    try:
+        expected_stats = _build_retrieval_stats(records, inverted)
+    except (TypeError, ValueError, MetadataValidationError):
+        return "retrieval stats cannot be recomputed"
+    if retrieval_stats != expected_stats:
+        return "retrieval stats stale"
     memory_ids = [record["memory_id"] for record in records]
     if len(memory_ids) != len(set(memory_ids)):
         return "metadata validation: duplicate memory_id"
@@ -1318,6 +1418,59 @@ def _matching_excerpt(record, query, terms):
         flat = " ".join(value.split())
         if nq in flat.lower() or any(t in _tokenize(flat.lower()) for t in terms): return flat[:240]
     return record["preview"][:240]
+
+
+def _bm25f_score_record(record: dict, query_terms: list[str], stats: dict) -> dict:
+    """Score one record with deterministic BM25F-v1 field contributions."""
+    k1, b = 1.2, 0.75
+    fields = _canonical_retrieval_fields(record)
+    phrase_terms = list(query_terms)
+    unique_terms = list(dict.fromkeys(query_terms))
+    contributions = []
+    term_score_sum = 0.0
+    for term in unique_terms:
+        df = stats.get("doc_freq", {}).get(term, 0)
+        doc_count = stats.get("doc_count", 0)
+        if doc_count <= 0 or df <= 0:
+            idf = 0.0
+        else:
+            idf = max(1e-9, math.log1p((doc_count - df + 0.5) / (df + 0.5)))
+        weighted_parts = []
+        for field, tokens in fields.items():
+            tf = tokens.count(term)
+            if not tf:
+                continue
+            avg_len = max(stats.get("fields", {}).get(field, {}).get("avg_len_milli", 0) / 1000.0, 1.0)
+            length_norm = (1.0 - b) + b * len(tokens) / avg_len
+            weighted_tf = _RETRIEVAL_FIELD_BOOSTS.get(field, _RETRIEVAL_FIELD_BOOSTS["__other__"]) * tf / length_norm
+            weighted_parts.append((field, tf, length_norm, weighted_tf))
+        norm_tf = sum(item[3] for item in weighted_parts)
+        term_score = idf * (k1 + 1.0) * norm_tf / (k1 + norm_tf) if norm_tf else 0.0
+        term_score_sum += term_score
+        for field, tf, length_norm, weighted_tf in weighted_parts:
+            share = weighted_tf / norm_tf if norm_tf else 0.0
+            contributions.append({
+                "term": term,
+                "field": field,
+                "tf": tf,
+                "idf": idf,
+                "length_norm": length_norm,
+                "contribution": term_score * share,
+            })
+    phrase_bonus = 0.0
+    if len(phrase_terms) > 1:
+        for tokens in fields.values():
+            if any(tokens[index:index + len(phrase_terms)] == phrase_terms for index in range(max(0, len(tokens) - len(phrase_terms) + 1))):
+                phrase_bonus = min(0.25 * max(term_score_sum, 1.0), 2.0)
+                break
+    score_raw = term_score_sum + phrase_bonus
+    return {
+        "score_raw": score_raw,
+        "score_milli": math.floor(score_raw * 1000.0 + 0.5),
+        "term_score_sum": term_score_sum,
+        "phrase_bonus": phrase_bonus,
+        "contributions": contributions,
+    }
 
 
 def _result_metadata(result: dict) -> dict:
@@ -1385,7 +1538,8 @@ def _search_sort_key(result: dict, as_of: str | None = None):
     superseded_by = result.get("superseded_by", [])
     superseded_rank = 0 if superseded_by else 1
     return (
-        -result["score"],
+        -result.get("score_raw", result["score"]),
+        -result.get("score", 0),
         -validity_rank,
         -trust_rank,
         -superseded_rank,
@@ -1403,21 +1557,36 @@ def _search_records(
     min_trust=None,
     as_of=None,
     include_superseded=False,
+    rank="bm25f",
 ):
     if limit < 1: raise ValueError("limit must be >= 1")
-    terms = list(dict.fromkeys(_tokenize(query))); ids = set()
+    if rank not in {"bm25f", "legacy"}:
+        raise ValueError("rank must be bm25f or legacy")
+    query_terms = _tokenize(query)
+    terms = list(dict.fromkeys(query_terms)); ids = set()
     if terms:
         for term in terms: ids.update(payload.get("inverted_terms", {}).get(term, []))
     else:
         ids.update(record["id"] for record in payload.get("records", []))
     by_id = {r["id"]: r for r in payload["records"]}; out = []
+    stats = payload.get("retrieval_stats") or _build_retrieval_stats(payload["records"], payload.get("inverted_terms", {}))
     for rid in ids:
         if rid in by_id:
-            r = by_id[rid]; s = _score_record(r, query, terms)
+            r = by_id[rid]
+            if rank == "legacy":
+                s = _score_record(r, query, terms)
+                scored = {"score_raw": float(s), "score_milli": s, "term_score_sum": float(s), "phrase_bonus": 0.0, "contributions": []}
+            else:
+                scored = _bm25f_score_record(r, query_terms, stats)
+                s = scored["score_milli"]
             if s > 0:
                 memory_id = r.get("memory_id", f"legacy:{rid}")
                 out.append({
                     "score": s,
+                    "score_raw": scored["score_raw"],
+                    "score_milli": scored["score_milli"],
+                    "scorer": "legacy-v1" if rank == "legacy" else "bm25f-v1",
+                    "scored": scored,
                     "record": r,
                     "excerpt": _matching_excerpt(r, query, terms),
                     "memory_id": memory_id,
@@ -1474,6 +1643,7 @@ def cmd_memory_search(
     as_of=None,
     include_superseded=False,
     explain=False,
+    rank="bm25f",
 ):
     query = query.strip()
     if not query: safe_print("❌ search query must not be empty"); return 1
@@ -1510,6 +1680,7 @@ def cmd_memory_search(
             min_trust=min_trust,
             as_of=as_of,
             include_superseded=include_superseded,
+            rank=rank,
         )
     except (MetadataValidationError, ValueError, InvalidOperation) as exc:
         safe_print(f"❌ invalid search filter: {exc}")
@@ -1526,11 +1697,36 @@ def cmd_memory_search(
             safe_print(f"    superseded-by={','.join(result['superseded_by'])}")
         if explain:
             metadata = _result_metadata(result)
+            safe_print(f"    scorer={result.get('scorer', 'legacy-v1')}")
+            scored = result.get("scored", {})
+            contributions = scored.get("contributions", [])
+            for term in terms:
+                term_items = [item for item in contributions if item["term"] == term]
+                if not term_items:
+                    safe_print(f"    term={term} field=none tf=0 contribution=0.000000")
+                    continue
+                for item in term_items:
+                    safe_print(
+                        f"    term={item['term']} field={item['field']} tf={item['tf']} "
+                        f"idf={item['idf']:.6f} length_norm={item['length_norm']:.6f} "
+                        f"contribution={item['contribution']:.6f}"
+                    )
+            safe_print(f"    phrase_bonus={scored.get('phrase_bonus', 0.0):.6f}")
+            validity = "unknown"
+            if normalized_as_of is not None:
+                valid_from = _normalize_time(metadata.get("valid_from"), "valid_from") if metadata.get("valid_from") else None
+                valid_to = _normalize_time(metadata.get("valid_to"), "valid_to") if metadata.get("valid_to") else None
+                if (valid_from is not None or valid_to is not None) and (valid_from is None or normalized_as_of >= valid_from) and (valid_to is None or normalized_as_of < valid_to):
+                    validity = "active"
+                elif valid_from is not None or valid_to is not None:
+                    validity = "expired"
             safe_print(
-                "    match=lexical "
-                f"fields={','.join(_explain_fields(r, query, terms)) or 'none'} "
-                f"metadata=schema:{metadata.get('schema_version')} "
-                f"memory_id:{metadata.get('memory_id')} "
+                f"    final_tiebreak=validity:{validity},trust:{'explicit' if metadata.get('trust') is not None else 'unknown'},"
+                f"superseded:{1 if result.get('superseded_by') else 0},memory_id:{metadata.get('memory_id')}"
+            )
+            safe_print(
+                "    metadata="
+                f"schema:{metadata.get('schema_version')} "
                 f"source:{metadata.get('source') or 'unknown'} "
                 f"trust:{metadata.get('trust') or 'unknown'} "
                 f"valid_from:{metadata.get('valid_from') or 'unknown'} "
@@ -2925,6 +3121,7 @@ def main():
     memory_search_parser.add_argument("--as-of", default=None, help="UTC-normalized ISO valid-time snapshot")
     memory_search_parser.add_argument("--include-superseded", action="store_true", help="Expand supersession chains in explain output")
     memory_search_parser.add_argument("--explain", action="store_true", help="Show lexical fields and normalized metadata")
+    memory_search_parser.add_argument("--rank", choices=["bm25f", "legacy"], default="bm25f", help="Ranking scorer (default: bm25f)")
 
     knowledge_check_parser = subparsers.add_parser("knowledge-check", help="Validate moss-mem memory layout")
     knowledge_check_parser.add_argument("--strict", action="store_true", help="Fail when memory index warnings are present")
@@ -3063,6 +3260,7 @@ def main():
             args.as_of,
             args.include_superseded,
             args.explain,
+            args.rank,
         ))
     elif args.command == "knowledge-check":
         cmd_knowledge_check(getattr(args, 'strict', False))
