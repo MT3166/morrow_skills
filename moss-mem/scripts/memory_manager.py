@@ -9,7 +9,11 @@ from __future__ import annotations
 import argparse
 import atexit
 import builtins
+from contextlib import contextmanager
+from functools import wraps
+import hashlib
 import os
+import secrets
 import shutil
 import signal
 import sys
@@ -119,6 +123,7 @@ OLD_TASKS_DIR = "MEMORY_TASKS"  # legacy — migrated on init
 INDEX_SCHEMA_VERSION = 1
 INDEX_JSON_FILE = "memory-index.json"
 INDEX_MD_FILE = "memory-index.md"
+TRANSACTIONS_DIR = ".moss-mem/transactions"
 
 # Auto-detect script location so callers don't need absolute paths
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -128,6 +133,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 def get_timestamp():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _unique_timestamped_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
+    """Return a readable timestamped path without overwriting an existing file."""
+    directory = Path(directory)
+    candidate = directory / f"{stem}{suffix}"
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}-{counter}{suffix}"
+        counter += 1
+    return candidate
 
 
 def ensure_tasks_dir():
@@ -150,14 +166,29 @@ def check_concurrent_edit():
     return False
 
 
-def acquire_lock():
+_HELD_LOCK_TOKEN = None
+
+
+class MutationLockError(RuntimeError):
+    """Raised only when a mutation command cannot acquire its lock."""
+
+
+def acquire_lock(command: str | None = None):
     """Acquire edit lock to prevent concurrent modifications. Uses O_EXCL for atomic creation."""
+    global _HELD_LOCK_TOKEN
     ensure_tasks_dir()
     lock_file = Path(TASKS_DIR) / ".edit_lock"
+    token = secrets.token_hex(16)
     try:
         fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         with os.fdopen(fd, "w") as f:
-            json.dump({"pid": os.getpid(), "time": datetime.now().isoformat()}, f)
+            json.dump({
+                "pid": os.getpid(),
+                "token": token,
+                "created_at": datetime.now().isoformat(),
+                "command": command or "unknown",
+            }, f)
+        _HELD_LOCK_TOKEN = token
         return True
     except FileExistsError:
         print(f"[ERROR] Lock already held by another process.")
@@ -167,14 +198,69 @@ def acquire_lock():
         return False
 
 
-def release_lock():
-    """Release edit lock."""
+def release_lock() -> bool:
+    """Release only the lock token owned by this process."""
+    global _HELD_LOCK_TOKEN
     lock_file = Path(TASKS_DIR) / ".edit_lock"
+    token = _HELD_LOCK_TOKEN
+    if not token:
+        return False
+    claim_file = lock_file.with_name(
+        f".edit_lock.release.{os.getpid()}.{secrets.token_hex(8)}"
+    )
     try:
-        if lock_file.exists():
-            lock_file.unlink()
+        # Atomically claim the pathname before inspecting it. A replacement
+        # created after this rename remains at .edit_lock and is untouched.
+        os.rename(lock_file, claim_file)
+        with _open(claim_file) as f:
+            data = json.load(f)
+        if data.get("token") != token:
+            # Restore a foreign claim only while the pathname is still free;
+            # never delete it if another process acquired a new lock.
+            try:
+                os.link(claim_file, lock_file)
+                os.unlink(claim_file)
+            except FileExistsError:
+                print("[WARNING] Lock changed while releasing; preserved foreign claim.")
+            _HELD_LOCK_TOKEN = None
+            return False
+        os.unlink(claim_file)
+        _HELD_LOCK_TOKEN = None
+        return True
+    except FileNotFoundError:
+        _HELD_LOCK_TOKEN = None
+        return False
     except Exception as e:
+        # Keep a claimed lock available for recovery if inspection or cleanup
+        # fails; deleting it could discard another owner's lock.
         print(f"[WARNING] Failed to release lock: {e}")
+        return False
+
+
+@contextmanager
+def mutation_lock(command: str):
+    """Acquire an owner-token lock for one complete mutation window."""
+    if not acquire_lock(command):
+        raise MutationLockError(f"Failed to acquire mutation lock for {command}")
+    try:
+        yield
+    finally:
+        release_lock()
+
+
+def locked_mutation(command: str):
+    """Decorate a command so its full body runs under the shared lock."""
+    def decorator(function):
+        @wraps(function)
+        def wrapper(*args, **kwargs):
+            try:
+                with mutation_lock(command):
+                    return function(*args, **kwargs)
+            except MutationLockError as exc:
+                print(f"[ERROR] {exc}")
+                sys.exit(1)
+        return wrapper
+    return decorator
 
 
 def _signal_handler(signum, frame):
@@ -267,9 +353,11 @@ def _memory_update(updates: dict):
                 new_body.insert(insert_at, f"- {updates['next_step']}")
 
         elif header.startswith("## 暂存与备忘区"):
-            # Keep blank lines and HTML comments, discard old note entries
-            new_body = [l for l in new_body if l.strip() == "" or l.strip().startswith("<!--")]
-            new_body.extend(new_scratch_lines)
+            # Preserve existing notes and append new entries at the end.
+            if new_scratch_lines:
+                if new_body and new_body[-1].strip():
+                    new_body.append("")
+                new_body.extend(new_scratch_lines)
             scratchpad_written = True
 
         output_lines.append(header)
@@ -324,110 +412,81 @@ def _create_default_memory():
 # Commands
 # ---------------------------------------------------------------------------
 
+@locked_mutation("start")
 def cmd_start(description: str, next_step: str):
     """Start a new task: create timestamped task file and update MEMORY.md."""
     ensure_tasks_dir()
-    if check_concurrent_edit():
-        print("[ERROR] Cannot start new task while another edit is in progress.")
-        sys.exit(1)
+    ts = get_timestamp()
+    task_file = str(_unique_timestamped_path(Path(TASKS_DIR), f"{ts}_task"))
 
-    if not acquire_lock():
-        print("[ERROR] Failed to acquire lock for start.")
-        sys.exit(1)
-    try:
-        ts = get_timestamp()
-        task_file = f"{TASKS_DIR}/{ts}_task.md"
+    with _open(task_file, "w") as f:
+        f.write(f"---\nname: {ts}_task\ndescription: {description}\ntype: task\n---\n\n")
+        f.write(f"# Task - {ts}\n\n")
+        f.write(f"## Description\n{description}\n\n")
+        f.write(f"## Next Step\n{next_step}\n\n")
+        f.write(f"## Status\n🔧 In Progress\n\n")
+        f.write(f"## Last Action\n<!-- pending -->\n\n")
+        f.write(f"## Key Decisions\n<!-- pending -->\n\n")
+        f.write(f"## Landmines\n<!-- none -->\n\n")
+        f.write(f"## Created\n{datetime.now().isoformat()}\n\n")
 
-        with _open(task_file, "w") as f:
-            f.write(f"---\nname: {ts}_task\ndescription: {description}\ntype: task\n---\n\n")
-            f.write(f"# Task - {ts}\n\n")
-            f.write(f"## Description\n{description}\n\n")
-            f.write(f"## Next Step\n{next_step}\n\n")
-            f.write(f"## Status\n🔧 In Progress\n\n")
-            f.write(f"## Last Action\n<!-- pending -->\n\n")
-            f.write(f"## Key Decisions\n<!-- pending -->\n\n")
-            f.write(f"## Landmines\n<!-- none -->\n\n")
-            f.write(f"## Created\n{datetime.now().isoformat()}\n\n")
+    _memory_update({
+        "pointer": task_file,
+        "touch": True,
+        "status": "🔧 In Progress",
+        "last_action": f"Started: {description}",
+    })
 
-        _memory_update({
-            "pointer": task_file,
-            "touch": True,
-            "status": "🔧 In Progress",
-            "last_action": f"Started: {description}",
-        })
-
-        safe_print(f"✅ Task started: {task_file}")
-        safe_print(f"📝 Pointer updated in MEMORY.md")
-
-    finally:
-        release_lock()
+    safe_print(f"✅ Task started: {task_file}")
+    safe_print(f"📝 Pointer updated in MEMORY.md")
 
 
+@locked_mutation("update")
 def cmd_update(description: str, next_step: str, status: str,
                last_action: str = None, key_decisions: str = None, landmines: str = None):
     """Update current task progress in MEMORY.md."""
-    if check_concurrent_edit():
-        print("[ERROR] Cannot update while another edit is in progress.")
-        sys.exit(1)
+    _memory_update({
+        "touch": True,
+        "status": status,
+        "next_step": next_step,
+        "scratchpad_notes": [description],
+    })
 
-    if not acquire_lock():
-        print("[ERROR] Failed to acquire lock for update.")
-        sys.exit(1)
-    try:
-        _memory_update({
-            "touch": True,
-            "status": status,
-            "next_step": next_step,
-            "scratchpad_notes": [description],
-        })
+    # Write to task file if any handoff fields are provided
+    if last_action or key_decisions or landmines:
+        task_file = get_current_task_file()
+        if task_file and Path(task_file).exists():
+            _update_task_file(task_file, last_action, key_decisions, landmines)
 
-        # Write to task file if any handoff fields are provided
-        if last_action or key_decisions or landmines:
-            task_file = get_current_task_file()
-            if task_file and Path(task_file).exists():
-                _update_task_file(task_file, last_action, key_decisions, landmines)
-
-        safe_print(f"✅ MEMORY.md updated")
-        safe_print(f"📊 Status: {status}")
-        safe_print(f"📋 Next: {next_step}")
-
-    finally:
-        release_lock()
+    safe_print(f"✅ MEMORY.md updated")
+    safe_print(f"📊 Status: {status}")
+    safe_print(f"📋 Next: {next_step}")
 
 
+@locked_mutation("complete")
 def cmd_complete(description: str):
     """Complete current task: archive and update MEMORY.md."""
-    if check_concurrent_edit():
-        print("[ERROR] Cannot complete task while another edit is in progress.")
-        sys.exit(1)
-
-    if not acquire_lock():
-        print("[ERROR] Failed to acquire lock for complete.")
-        sys.exit(1)
-    try:
-        current_task = get_current_task_file()
-        if current_task:
-            if Path(current_task).exists():
-                _archive_task(current_task)
-            else:
-                print(f"[WARNING] Task file not found: {current_task} (pointer may be stale)")
+    current_task = get_current_task_file()
+    if current_task:
+        if Path(current_task).exists():
+            _archive_task(current_task)
         else:
-            print(f"[WARNING] No current task pointer found in MEMORY.md")
+            print(f"[WARNING] Task file not found: {current_task} (pointer may be stale)")
+    else:
+        print(f"[WARNING] No current task pointer found in MEMORY.md")
 
-        _append_to_archive(description)
+    _append_to_archive(description)
 
-        _memory_update({
-            "touch": True,
-            "status": "✅ Completed",
-            "last_action": f"Completed: {description}",
-        })
+    _memory_update({
+        "touch": True,
+        "pointer": "N/A",
+        "status": "✅ Completed",
+        "last_action": f"Completed: {description}",
+    })
 
-        safe_print(f"✅ Task completed and archived")
-        # Post-complete: nudge user to compact if tasks/ has grown past threshold.
-        check_compact_threshold(threshold=30, source="complete")
-
-    finally:
-        release_lock()
+    safe_print(f"✅ Task completed and archived")
+    # Post-complete: nudge user to compact if tasks/ has grown past threshold.
+    check_compact_threshold(threshold=30, source="complete")
 
 
 # Default growth thresholds for passive 🛑 STOP nudges (never auto-execute).
@@ -517,16 +576,11 @@ def check_compact_threshold(
     safe_print(f"   (Triggered after: {source}. Compaction is never automatic; nudge ≠ permission to delete.)")
 
 
+@locked_mutation("add-note")
 def cmd_add_note(note: str):
     """Add a free-form note to MEMORY.md scratchpad."""
-    if not acquire_lock():
-        print("[ERROR] Failed to acquire lock for add-note.")
-        sys.exit(1)
-    try:
-        _memory_update({"scratchpad_notes": [note]})
-        safe_print(f"✅ Note added to scratchpad")
-    finally:
-        release_lock()
+    _memory_update({"scratchpad_notes": [note]})
+    safe_print(f"✅ Note added to scratchpad")
 
 
 def cmd_show(task_file: str = None):
@@ -537,7 +591,8 @@ def cmd_show(task_file: str = None):
         print("[ERROR] No task file specified and no current pointer found in MEMORY.md")
         sys.exit(1)
     if not Path(task_file).exists():
-        print(f"[ERROR] Task file not found: {task_file}")
+        print(f"[ERROR] Stale task pointer: {task_file}")
+        print("[NEXT] Run `state commit` to create a fresh task pointer, or repair MEMORY.md manually.")
         sys.exit(1)
     with _open(task_file) as f:
         content = f.read()
@@ -559,11 +614,31 @@ def cmd_recover():
 
     # Check lock file first
     lock_file = Path(TASKS_DIR) / ".edit_lock"
-    if lock_file.exists():
+    lock_blocked = lock_file.exists()
+    if lock_blocked:
         safe_print(f"⚠️  Lock file exists: {lock_file}")
         print("   If the previous process was killed, delete it with:")
         print(f"   rm {lock_file}")
         print()
+
+    transaction_dir = Path(TRANSACTIONS_DIR)
+    pending_manifests = sorted(transaction_dir.glob("*.json")) if transaction_dir.exists() else []
+    if pending_manifests:
+        print("Pending compaction transactions:")
+        if lock_blocked:
+            safe_print("   Recovery is read-only until the existing lock is cleared.")
+            for manifest_path in pending_manifests:
+                safe_print(f"   {manifest_path}: pending")
+        else:
+            with mutation_lock("recover"):
+                for manifest_path in pending_manifests:
+                    try:
+                        recovered, conflicts = _recover_compaction_manifest(manifest_path)
+                        safe_print(
+                            f"   {manifest_path}: recovered={recovered}, conflicts={conflicts}"
+                        )
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        safe_print(f"⚠️  Could not recover {manifest_path}: {exc}")
 
     # Check current task
     task_file = get_current_task_file()
@@ -584,6 +659,7 @@ def cmd_recover():
                 safe_print("⚠️  Task file has no ## Last Action section.")
         else:
             safe_print(f"⚠️  Task file not found: {task_file} (stale pointer)")
+            safe_print("   Next: run `state commit` to create a fresh task pointer, or repair MEMORY.md manually.")
     else:
         print("No current task pointer found.")
 
@@ -663,6 +739,7 @@ def cmd_knowledge_init(domain: str = None):
     cmd_init()
     Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
     Path(INDEX_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(TRANSACTIONS_DIR).mkdir(parents=True, exist_ok=True)
     for directory in [Path(TASKS_DIR), Path(SUMMARIES_DIR), Path(INDEX_CACHE_DIR)]:
         gitkeep = directory / ".gitkeep"
         if not gitkeep.exists():
@@ -671,6 +748,7 @@ def cmd_knowledge_init(domain: str = None):
     safe_print("ℹ️  AGENTS.md and project docs are external; moss-mem reads them only when present.")
 
 
+@locked_mutation("knowledge-index")
 def cmd_knowledge_index():
     """Regenerate dependency-free JSON and Markdown memory indexes."""
     try:
@@ -751,19 +829,35 @@ def _current_source_metadata():
 
 
 def _build_index_payload():
-    records, warnings, inverted = [], [], defaultdict(set)
-    for path in _discover_memory_sources():
-        try:
-            record = _parse_memory_record(path, len(records))
-        except (OSError, UnicodeError) as exc:
-            warnings.append(f"skipped unreadable source {path}: {exc}")
-            continue
-        records.append(record)
-        for term in _tokenize(" ".join([record["title"], *record["sections"].values()])):
-            inverted[term].add(record["id"])
-    if not records:
-        raise ValueError("no readable memory sources")
-    return {"schema_version": INDEX_SCHEMA_VERSION, "generated_at": datetime.now().isoformat(timespec="seconds"), "sources": {r["path"]: r["mtime_ns"] for r in records}, "records": records, "inverted_terms": {t: sorted(ids) for t, ids in sorted(inverted.items())}}, warnings
+    for attempt in range(2):
+        before = _current_source_metadata()
+        records, warnings, inverted = [], [], defaultdict(set)
+        for path in _discover_memory_sources():
+            try:
+                record = _parse_memory_record(path, len(records))
+            except (OSError, UnicodeError) as exc:
+                warnings.append(f"skipped unreadable source {path}: {exc}")
+                continue
+            records.append(record)
+            for term in _tokenize(" ".join([record["title"], *record["sections"].values()])):
+                inverted[term].add(record["id"])
+        if not records:
+            raise ValueError("no readable memory sources")
+        after = _current_source_metadata()
+        if before != after:
+            if attempt == 0:
+                continue
+            raise OSError("memory sources changed during index build")
+        payload = {
+            "schema_version": INDEX_SCHEMA_VERSION,
+            "build_id": f"{get_timestamp()}-{secrets.token_hex(8)}",
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "sources": {r["path"]: r["mtime_ns"] for r in records},
+            "records": records,
+            "inverted_terms": {t: sorted(ids) for t, ids in sorted(inverted.items())},
+        }
+        return payload, warnings
+    raise OSError("memory sources changed during index build")
 
 
 FIELD_WEIGHTS = {"title": 8, "Description": 5, "Summary": 5, "Decisions": 5, "Key Decisions": 5, "Landmines": 5, "Related Files": 3, "Next Step": 3}
@@ -772,6 +866,7 @@ def _load_index_payload():
 def _index_problem(payload):
     if not isinstance(payload, dict): return "schema mismatch"
     if payload.get("schema_version") != INDEX_SCHEMA_VERSION: return "schema mismatch"
+    if not isinstance(payload.get("build_id"), str) or not payload["build_id"].strip(): return "schema mismatch"
     if not isinstance(payload.get("generated_at"), str) or not payload["generated_at"].strip(): return "schema mismatch"
     indexed = payload.get("sources")
     if not isinstance(indexed, dict): return "schema mismatch"
@@ -797,6 +892,12 @@ def _index_problem(payload):
     if not isinstance(inverted, dict): return "schema mismatch"
     for term, refs in inverted.items():
         if not isinstance(term, str) or not isinstance(refs, list) or any(not isinstance(i, int) or isinstance(i, bool) or i not in ids for i in refs) or len(refs) != len(set(refs)): return "schema mismatch"
+    for record in records:
+        terms = set(_tokenize(" ".join([record["title"], *record["sections"].values()])))
+        for term in terms:
+            refs = inverted.get(term)
+            if not isinstance(refs, list) or record["id"] not in refs:
+                return "inverted index incomplete"
     current = _current_source_metadata()
     if set(current) != set(indexed): return "source set changed"
     if any(current[p] != indexed[p] for p in current): return "source modified"
@@ -811,6 +912,7 @@ def _markdown_index_problem(payload):
     lines = text.splitlines()
     if not lines or lines[0] != "# moss-mem Memory Index": return "invalid header"
     if not any(line.startswith("Generated: ") and line[10:].strip() for line in lines): return "missing Generated line"
+    if not any(line == f"Build ID: {payload['build_id']}" for line in lines): return "build ID mismatch"
     count = next((line for line in lines if line.startswith("Records: ")), None)
     if count is None or not count[9:].isdigit() or int(count[9:]) != len(payload["records"]): return "record count mismatch"
     for record in payload["records"]:
@@ -888,7 +990,7 @@ def cmd_memory_search(query, limit=10):
 
 def _render_index_markdown(payload, warnings):
     labels = [("memory", "Memory"), ("task", "Tasks"), ("archived-task", "Archived Tasks"), ("archive-index", "Archive Indexes"), ("summary", "Summaries")]
-    lines = ["# moss-mem Memory Index", "", f"Generated: {payload['generated_at']}", f"Records: {len(payload['records'])}"]
+    lines = ["# moss-mem Memory Index", "", f"Generated: {payload['generated_at']}", f"Build ID: {payload['build_id']}", f"Records: {len(payload['records'])}"]
     for kind, label in labels:
         lines.extend(["", f"## {label}"])
         matches = [r for r in payload["records"] if r["kind"] == kind]
@@ -905,11 +1007,13 @@ def _render_index_markdown(payload, warnings):
 
 def _write_index_files(payload, warnings):
     Path(INDEX_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    payload.setdefault("build_id", f"{get_timestamp()}-{secrets.token_hex(8)}")
     outputs = {Path(INDEX_CACHE_DIR) / INDEX_JSON_FILE: json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", Path(INDEX_CACHE_DIR) / INDEX_MD_FILE: _render_index_markdown(payload, warnings)}
     previous = {p: p.read_bytes() if p.exists() else None for p in outputs}; temp_paths = {}
     try:
         for path, text in outputs.items():
-            temp = path.with_suffix(path.suffix + ".tmp"); temp.write_text(text, encoding="utf-8"); temp_paths[path] = temp
+            temp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp")
+            temp.write_text(text, encoding="utf-8"); temp_paths[path] = temp
         for path, temp in temp_paths.items(): os.replace(temp, path)
     except OSError as original_error:
         rollback_errors = []
@@ -945,6 +1049,10 @@ def cmd_knowledge_check(strict: bool = False):
             errors.append(f"missing file: {raw_path}")
         elif kind == "dir" and not path.is_dir():
             errors.append(f"missing directory: {raw_path}")
+
+    pointer = get_current_task_file()
+    if pointer and "YYYYMMDD" not in pointer and not Path(pointer).exists():
+        errors.append(f"stale task pointer: {pointer}")
 
     agents_path = Path("AGENTS.md")
     if agents_path.exists():
@@ -1006,13 +1114,14 @@ def _yaml_scalar(value: str) -> str:
     return f'"{escaped}"'
 
 
+@locked_mutation("summary-capture")
 def cmd_summary_capture(topic: str, summary: str, source: str = "harness", decisions: str = "", next_step: str = "", related: str = ""):
     """Capture a harness/session summary into .moss-mem/summaries/."""
     Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     filename_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = _slugify_topic(topic)
-    summary_path = Path(SUMMARIES_DIR) / f"{filename_ts}-{slug}.md"
+    summary_path = _unique_timestamped_path(Path(SUMMARIES_DIR), f"{filename_ts}-{slug}")
 
     related_lines = []
     for item in related.split(","):
@@ -1197,13 +1306,15 @@ def get_current_task_file():
                 if "`" in line:
                     start = line.find("`") + 1
                     end = line.rfind("`")
-                    return line[start:end] if end > start else None
+                    value = line[start:end] if end > start else None
+                    return None if value in {"N/A", "None"} else value
                 # Fallback: split by either Chinese or English colon
                 for sep in ("：", ":"):
                     if sep in line:
                         parts = line.split(sep)
                         if len(parts) > 1:
-                            return parts[-1].strip()
+                            value = parts[-1].strip()
+                            return None if value in {"N/A", "None"} else value
     return None
 
 
@@ -1333,6 +1444,112 @@ def _atomic_write_text(dest: Path, body: str) -> None:
         raise
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_compaction_manifest(manifest: dict) -> Path:
+    directory = Path(TRANSACTIONS_DIR)
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest_path = _unique_timestamped_path(
+        directory,
+        f"compact-{get_timestamp()}-{secrets.token_hex(4)}",
+        suffix=".json",
+    )
+    _atomic_write_text(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return manifest_path
+
+
+def _update_compaction_manifest(path: Path, manifest: dict) -> None:
+    _atomic_write_text(
+        path,
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def _manifest_add_entry(manifest_path: Path | None, manifest: dict | None, entry: dict) -> dict:
+    if manifest_path is None or manifest is None:
+        return entry
+    manifest["entries"].append(entry)
+    _update_compaction_manifest(manifest_path, manifest)
+    return entry
+
+
+def _manifest_update_entry(manifest_path: Path | None, manifest: dict | None, entry: dict, **updates) -> None:
+    entry.update(updates)
+    if manifest_path is not None and manifest is not None:
+        _update_compaction_manifest(manifest_path, manifest)
+
+
+def _manifest_destination_matches(entry: dict) -> bool:
+    destination = Path(entry["destination"])
+    if not destination.exists():
+        return False
+    if entry.get("operation") == "summary":
+        marker = entry.get("marker", "")
+        try:
+            return bool(marker) and marker in destination.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    expected = entry.get("destination_sha256")
+    if not expected:
+        return False
+    try:
+        return _sha256_path(destination) == expected
+    except OSError:
+        return False
+
+
+def _recover_compaction_manifest(path: Path) -> tuple[int, int]:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    recovered = 0
+    conflicts = 0
+    for entry in manifest.get("entries", []):
+        if entry.get("status") == "done":
+            continue
+        source = Path(entry["source"])
+        operation = entry.get("operation")
+        if operation == "rewrite":
+            if _manifest_destination_matches(entry):
+                entry["status"] = "done"
+            elif Path(entry["destination"]).exists():
+                conflicts += 1
+            continue
+        if not _manifest_destination_matches(entry):
+            if Path(entry["destination"]).exists():
+                conflicts += 1
+            continue
+        if source.exists():
+            expected_source = entry.get("source_sha256")
+            if expected_source:
+                try:
+                    if _sha256_path(source) != expected_source:
+                        conflicts += 1
+                        continue
+                except OSError:
+                    conflicts += 1
+                    continue
+            try:
+                source.unlink()
+                recovered += 1
+            except OSError:
+                continue
+        entry["status"] = "done"
+
+    if all(entry.get("status") == "done" for entry in manifest.get("entries", [])):
+        path.unlink(missing_ok=True)
+    else:
+        _update_compaction_manifest(path, manifest)
+    return recovered, conflicts
+
+
 def _confirm_compact(yes: bool, dry_run: bool) -> int | None:
     """Return None to proceed, 2 if user aborts. dry_run never prompts."""
     if dry_run or yes:
@@ -1353,6 +1570,8 @@ def _compact_active_tasks(
     strategy: str,
     keep_recent: int,
     dry_run: bool,
+    manifest_path: Path | None = None,
+    manifest: dict | None = None,
 ) -> tuple[int, int, int]:
     """Archive old active task files. Returns (exit_code, moved, saved_bytes).
 
@@ -1402,17 +1621,42 @@ def _compact_active_tasks(
             if strategy == "archive-summary"
             else content
         )
-        dest = archive_dir / f"{get_timestamp()}_{src.name}"
+        dest = _unique_timestamped_path(archive_dir, f"{get_timestamp()}_{src.stem}")
         if not dry_run:
+            entry = _manifest_add_entry(manifest_path, manifest, {
+                "source": str(src),
+                "destination": str(dest),
+                "source_sha256": _sha256_path(src),
+                "operation": "move",
+                "status": "planned",
+            })
             try:
                 _atomic_write_text(dest, new_body)
             except OSError as e:
                 safe_print(f"❌ Failed to write {dest}: {e}. Aborting further moves.")
                 return 1, moved, saved_bytes
+            _manifest_update_entry(
+                manifest_path,
+                manifest,
+                entry,
+                destination_sha256=_sha256_path(dest),
+                status="written",
+            )
+            try:
+                if _sha256_path(src) != entry["source_sha256"]:
+                    safe_print(f"❌ Source changed during compaction; kept {src} and left manifest for recovery.")
+                    return 1, moved, saved_bytes
+            except OSError as e:
+                safe_print(f"❌ Could not verify source before removal: {e}. Aborting further moves.")
+                return 1, moved, saved_bytes
             try:
                 src.unlink()
             except FileNotFoundError:
                 pass
+            except OSError as e:
+                safe_print(f"❌ Failed to remove {src}: {e}. Aborting further moves.")
+                return 1, moved, saved_bytes
+            _manifest_update_entry(manifest_path, manifest, entry, status="done")
             saved_bytes += max(0, len(content) - len(new_body))
         moved += 1
     return 0, moved, saved_bytes
@@ -1422,6 +1666,8 @@ def _compact_archive(
     strategy: str,
     keep_recent: int,
     dry_run: bool,
+    manifest_path: Path | None = None,
+    manifest: dict | None = None,
 ) -> tuple[int, int, int]:
     """Secondary-compress older archive task bodies in place (or rewrite summary).
 
@@ -1480,11 +1726,25 @@ def _compact_archive(
             continue
         new_body = _summarize_task_body(content, src.name)
         if not dry_run:
+            entry = _manifest_add_entry(manifest_path, manifest, {
+                "source": str(src),
+                "destination": str(src),
+                "source_sha256": _sha256_path(src),
+                "operation": "rewrite",
+                "status": "planned",
+            })
             try:
                 _atomic_write_text(src, new_body)
             except OSError as e:
                 safe_print(f"❌ Failed to rewrite {src}: {e}. Aborting further archive rewrites.")
                 return 1, moved, saved_bytes
+            _manifest_update_entry(
+                manifest_path,
+                manifest,
+                entry,
+                destination_sha256=_sha256_path(src),
+                status="done",
+            )
             saved_bytes += max(0, len(content) - len(new_body))
         moved += 1
     return 0, moved, saved_bytes
@@ -1524,6 +1784,8 @@ def _extract_summary_fields(content: str, path: Path) -> dict[str, str]:
 def _compact_summaries(
     keep_recent: int,
     dry_run: bool,
+    manifest_path: Path | None = None,
+    manifest: dict | None = None,
 ) -> tuple[int, int, int]:
     """Merge older non-digest summaries into monthly digest-YYYY-MM.md files.
 
@@ -1558,7 +1820,7 @@ def _compact_summaries(
     moved = 0
     saved_bytes = 0
     for month, group in sorted(by_month.items()):
-        entries: list[str] = []
+        entry_specs: list[tuple[Path, str, str, str]] = []
         group_bytes = 0
         for src in sorted(group, key=lambda p: p.name):
             try:
@@ -1568,6 +1830,8 @@ def _compact_summaries(
                 continue
             group_bytes += len(content)
             fields = _extract_summary_fields(content, src)
+            source_hash = _sha256_path(src)
+            marker = f"<!-- moss-mem-source: {src} sha256={source_hash} -->"
             block = [f"### {fields['topic']} (`{src.name}`)"]
             if fields["summary"] and fields["summary"] != "<!-- none -->":
                 block.append(f"**Summary:** {fields['summary']}")
@@ -1575,8 +1839,8 @@ def _compact_summaries(
                 block.append(f"**Decisions:** {fields['decisions']}")
             if fields["next_step"] and fields["next_step"] not in ("<!-- none -->", "<!-- pending -->"):
                 block.append(f"**Next Step:** {fields['next_step']}")
-            entries.append("\n".join(block))
-        if not entries:
+            entry_specs.append((src, marker, "\n".join(block), source_hash))
+        if not entry_specs:
             continue
         digest_name = f"digest-{month}.md"
         digest_path = Path(SUMMARIES_DIR) / digest_name
@@ -1584,42 +1848,71 @@ def _compact_summaries(
         if digest_path.exists():
             try:
                 existing = digest_path.read_text(encoding="utf-8").rstrip() + "\n\n"
-            except OSError:
-                existing = ""
+            except OSError as e:
+                safe_print(f"❌ Existing digest {digest_path} is unreadable: {e}. Originals kept.")
+                return 1, moved, saved_bytes
+        new_entries = [
+            f"{block}\n{marker}"
+            for src, marker, block, source_hash in entry_specs
+            if marker not in existing
+        ]
         header = (
             f"# Summary Digest {month}\n"
             f"_Merged at {datetime.now().isoformat(timespec='seconds')}_"
-            f" from {len(entries)} summary file(s).\n\n"
+            f" from {len(new_entries)} summary file(s).\n\n"
             f"## Decisions\n"
             f"See per-topic blocks below (searchable via memory-search).\n\n"
             f"## Topics\n"
         )
         # If appending to existing digest, keep prior body and append new topics.
         if existing and existing.lstrip().startswith("# Summary Digest"):
-            body = existing + "\n".join(entries) + "\n"
+            body = existing + ("\n".join(new_entries) + "\n" if new_entries else "")
         else:
-            body = header + "\n\n".join(entries) + "\n"
+            body = header + "\n\n".join(new_entries) + "\n"
 
         if not dry_run:
+            manifest_entries = []
+            for src, marker, block, source_hash in entry_specs:
+                manifest_entries.append(_manifest_add_entry(manifest_path, manifest, {
+                    "source": str(src),
+                    "destination": str(digest_path),
+                    "source_sha256": source_hash,
+                    "marker": marker,
+                    "operation": "summary",
+                    "status": "planned",
+                }))
             try:
-                _atomic_write_text(digest_path, body)
+                if new_entries or not digest_path.exists():
+                    _atomic_write_text(digest_path, body)
             except OSError as e:
                 safe_print(f"❌ Failed to write {digest_path}: {e}. Aborting; originals kept.")
                 return 1, moved, saved_bytes
-            for src in group:
+            for src, marker, block, source_hash in entry_specs:
+                entry = next(item for item in manifest_entries if item["source"] == str(src))
+                _manifest_update_entry(manifest_path, manifest, entry, status="written")
+                try:
+                    if _sha256_path(src) != source_hash:
+                        safe_print(f"❌ Source changed during compaction; kept {src} and left manifest for recovery.")
+                        return 1, moved, saved_bytes
+                except OSError as e:
+                    safe_print(f"❌ Could not verify source before removal: {e}. Aborting further summaries.")
+                    return 1, moved, saved_bytes
                 try:
                     src.unlink()
                     moved += 1
                 except FileNotFoundError:
-                    pass
+                    moved += 1
                 except OSError as e:
-                    safe_print(f"⚠️  Digest written but could not remove {src.name}: {e}")
+                    safe_print(f"❌ Digest written but could not remove {src.name}: {e}")
+                    return 1, moved, saved_bytes
+                _manifest_update_entry(manifest_path, manifest, entry, status="done")
             saved_bytes += max(0, group_bytes - len(body))
         else:
-            moved += len(group)
+            moved += len(entry_specs)
     return 0, moved, saved_bytes
 
 
+@locked_mutation("compact")
 def cmd_compact(
     strategy: str = "archive-summary",
     keep_recent: int = 10,
@@ -1678,16 +1971,38 @@ def cmd_compact(
     if abort is not None:
         return abort
 
+    manifest_path = None
+    manifest = None
+    if not dry_run:
+        manifest = {
+            "id": f"compact-{get_timestamp()}-{secrets.token_hex(4)}",
+            "scope": scope,
+            "strategy": strategy,
+            "created_at": datetime.now().isoformat(),
+            "entries": [],
+        }
+        try:
+            manifest_path = _write_compaction_manifest(manifest)
+        except OSError as exc:
+            safe_print(f"❌ Failed to create compaction manifest: {exc}")
+            return 1
+
     total_moved = 0
     total_saved = 0
     any_work = False
     for sc in scopes:
         if sc == "tasks":
-            code, moved, saved = _compact_active_tasks(strategy, keep_recent, dry_run)
+            code, moved, saved = _compact_active_tasks(
+                strategy, keep_recent, dry_run, manifest_path, manifest
+            )
         elif sc == "archive":
-            code, moved, saved = _compact_archive(strategy, keep_recent, dry_run)
+            code, moved, saved = _compact_archive(
+                strategy, keep_recent, dry_run, manifest_path, manifest
+            )
         else:
-            code, moved, saved = _compact_summaries(keep_recent, dry_run)
+            code, moved, saved = _compact_summaries(
+                keep_recent, dry_run, manifest_path, manifest
+            )
         if code != 0:
             safe_print(f"❌ Scope `{sc}` failed; stopping remaining scopes.")
             return code
@@ -1695,6 +2010,9 @@ def cmd_compact(
             any_work = True
         total_moved += moved
         total_saved += saved
+
+    if manifest_path is not None:
+        manifest_path.unlink(missing_ok=True)
 
     saved_tokens = max(0, total_saved // 4)
     safe_print("")
@@ -1722,9 +2040,8 @@ def _archive_task(task_file: str):
         with _open(task_path) as f:
             content = f.read()
         ts = get_timestamp()
-        archive_file = archive_dir / f"{ts}_{task_path.name}"
-        with _open(archive_file, "w") as f:
-            f.write(content)
+        archive_file = _unique_timestamped_path(archive_dir, f"{ts}_{task_path.stem}")
+        _atomic_write_text(archive_file, content)
         try:
             task_path.unlink()
         except FileNotFoundError:
@@ -1781,6 +2098,7 @@ def _migrate_old_tasks_dir():
     print(f"   MEMORY.md pointers to {OLD_TASKS_DIR}/ are left unchanged until you migrate files manually.")
 
 
+@locked_mutation("init")
 def cmd_init():
     """Initialize MEMORY.md and .moss-mem/{tasks,summaries,index-cache}/ directories."""
     # Ensure .moss-mem/ parent exists
@@ -1796,6 +2114,7 @@ def cmd_init():
     # on a fresh project — confusing for new users.
     Path(SUMMARIES_DIR).mkdir(parents=True, exist_ok=True)
     Path(INDEX_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    Path(TRANSACTIONS_DIR).mkdir(parents=True, exist_ok=True)
 
     archive_path = Path(TASKS_DIR) / ARCHIVE_FILE
     if not archive_path.exists():
