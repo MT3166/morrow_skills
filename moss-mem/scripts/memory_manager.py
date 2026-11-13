@@ -1615,6 +1615,136 @@ def _supersession_chain(payload: dict, memory_id: str, direction: str) -> list[s
     return sorted(visited)
 
 
+def _classify_validity(metadata: dict, as_of: str | None) -> str:
+    """Classify an optional half-open valid interval at a UTC instant."""
+    if as_of is None:
+        return "unknown"
+    instant = _normalize_time(as_of, "as_of")
+    valid_from = _normalize_time(metadata.get("valid_from"), "valid_from") if metadata.get("valid_from") else None
+    valid_to = _normalize_time(metadata.get("valid_to"), "valid_to") if metadata.get("valid_to") else None
+    if valid_from is None and valid_to is None:
+        return "unknown"
+    if valid_from is not None and instant < valid_from:
+        return "upcoming"
+    if valid_to is not None and instant >= valid_to:
+        return "expired"
+    return "active"
+
+
+def _lineage_bfs(neighbours, start: str, depth: int) -> list[dict]:
+    if not isinstance(depth, int) or isinstance(depth, bool) or depth < 0 or depth > 64:
+        raise MetadataValidationError("depth must be an integer in [0,64]")
+    if depth == 0:
+        return []
+    visited = {start}
+    frontier = [start]
+    output = []
+    for level in range(1, depth + 1):
+        next_frontier = []
+        for node in frontier:
+            for target in sorted(neighbours(node)):
+                if target not in visited:
+                    visited.add(target)
+                    next_frontier.append(target)
+        next_frontier.sort()
+        output.extend({"memory_id": target, "depth": level} for target in next_frontier)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return output
+
+
+def _build_lineage_view(payload: dict, memory_id: str, depth: int = 3) -> dict:
+    records = {record.get("memory_id"): record for record in payload.get("records", [])}
+    if memory_id not in records:
+        raise KeyError(memory_id)
+    record = records[memory_id]
+    ancestors = _lineage_bfs(
+        lambda node: records.get(node, {}).get("metadata", {}).get("supersedes", []),
+        memory_id,
+        depth,
+    )
+    descendants = _lineage_bfs(
+        lambda node: payload.get("superseded_by", {}).get(node, []),
+        memory_id,
+        depth,
+    )
+    return {
+        "record": record,
+        "direct": {
+            "supersedes": sorted(record.get("metadata", {}).get("supersedes", [])),
+            "superseded_by": sorted(payload.get("superseded_by", {}).get(memory_id, [])),
+        },
+        "lineage": {"ancestors": ancestors, "descendants": descendants},
+    }
+
+
+def _timeline_interval_intersects(metadata: dict, query_from: str | None, query_to: str | None) -> bool:
+    if query_from is None and query_to is None:
+        return True
+    valid_from = _normalize_time(metadata.get("valid_from"), "valid_from") if metadata.get("valid_from") else None
+    valid_to = _normalize_time(metadata.get("valid_to"), "valid_to") if metadata.get("valid_to") else None
+    if valid_from is None and valid_to is None:
+        return False
+    if query_to is not None and valid_from is not None and valid_from >= query_to:
+        return False
+    if query_from is not None and valid_to is not None and valid_to <= query_from:
+        return False
+    return True
+
+
+def _filter_timeline_records(
+    records: list[dict],
+    source: str | None = None,
+    as_of: str | None = None,
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    include_superseded: bool = False,
+    superseded_by: dict | None = None,
+) -> list[dict]:
+    normalized_source = _normalize_source(source)
+    normalized_as_of = _normalize_time(as_of, "as_of") if as_of is not None else None
+    normalized_from = _normalize_time(valid_from, "from") if valid_from is not None else None
+    normalized_to = _normalize_time(valid_to, "to") if valid_to is not None else None
+    if normalized_from is not None and normalized_to is not None and normalized_to <= normalized_from:
+        raise MetadataValidationError("to must be later than from")
+    output = []
+    for record in records:
+        metadata = record.get("metadata", {})
+        if normalized_source is not None and metadata.get("source") != normalized_source:
+            continue
+        if normalized_as_of is not None and _classify_validity(metadata, normalized_as_of) != "active":
+            continue
+        if not _timeline_interval_intersects(metadata, normalized_from, normalized_to):
+            continue
+        if not include_superseded and superseded_by and superseded_by.get(record.get("memory_id")):
+            continue
+        output.append(record)
+    return output
+
+
+def _sort_timeline_records(records: list[dict]) -> list[dict]:
+    def key(record):
+        metadata = record.get("metadata", {})
+        valid_from = _normalize_time(metadata.get("valid_from"), "valid_from") if metadata.get("valid_from") else None
+        recorded_at = _normalize_time(metadata.get("recorded_at"), "recorded_at") if metadata.get("recorded_at") else None
+        return (valid_from is None, valid_from or "", recorded_at is None, recorded_at or "", record.get("memory_id", ""))
+    return sorted(records, key=key)
+
+
+def _timeline_record_view(record: dict, as_of: str | None, payload: dict) -> dict:
+    return {
+        "memory_id": record.get("memory_id"),
+        "path": record.get("path"),
+        "title": record.get("title"),
+        "preview": record.get("preview"),
+        "schema_version": record.get("schema_version"),
+        "metadata": record.get("metadata", {}),
+        "validity": _classify_validity(record.get("metadata", {}), as_of),
+        "superseded_by": sorted(payload.get("superseded_by", {}).get(record.get("memory_id"), [])),
+    }
+
+
 def _explain_fields(record: dict, query: str, terms: list[str]) -> list[str]:
     labels = []
     normalized_query = " ".join(query.lower().split())
@@ -1738,6 +1868,106 @@ def cmd_memory_search(
             superseded_by = _supersession_chain(payload, memory_id, "superseded_by")
             safe_print(f"    supersedes-chain={','.join(supersedes) or 'none'}")
             safe_print(f"    superseded-by-chain={','.join(superseded_by) or 'none'}")
+    return 0
+
+
+def _load_complete_index_for_view() -> tuple[dict | None, str | None]:
+    payload = None
+    try:
+        payload = _load_index_payload()
+        reason = _index_problem(payload)
+    except FileNotFoundError:
+        reason = "missing index"
+    except (json.JSONDecodeError, OSError) as exc:
+        reason = f"unreadable index: {exc}"
+    if not reason:
+        return payload, None
+    try:
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            rebuilt = cmd_knowledge_index()
+    except Exception:
+        rebuilt = False
+    if not rebuilt:
+        return None, "index_unavailable"
+    try:
+        payload = _load_index_payload()
+        problem = _index_problem(payload)
+    except (OSError, json.JSONDecodeError):
+        return None, "index_unavailable"
+    return (payload, None) if not problem else (None, "index_unavailable")
+
+
+def _view_error(code: str, message: str, json_output: bool) -> int:
+    value = {"error": {"code": code, "message": message}}
+    if json_output:
+        safe_print(json.dumps(value, ensure_ascii=False, sort_keys=True))
+    else:
+        safe_print(f"❌ {code}: {message}")
+    return 2 if code in {"unknown_id", "invalid_argument"} else 1
+
+
+def cmd_memory_explain(memory_id, depth=3, as_of=None, json_output=False):
+    try:
+        if not isinstance(depth, int) or isinstance(depth, bool) or depth < 0 or depth > 64:
+            raise MetadataValidationError("depth must be an integer in [0,64]")
+        if as_of is not None:
+            _normalize_time(as_of, "as_of")
+    except (MetadataValidationError, ValueError) as exc:
+        return _view_error("invalid_argument", str(exc), json_output)
+    payload, error = _load_complete_index_for_view()
+    if error:
+        return _view_error(error, "complete index unavailable", json_output)
+    try:
+        view = _build_lineage_view(payload, memory_id, depth)
+    except KeyError:
+        return _view_error("unknown_id", f"memory_id not found: {memory_id}", json_output)
+    record = view["record"]
+    result = {
+        "record": {key: record.get(key) for key in ("memory_id", "path", "title", "preview", "schema_version", "metadata")},
+        "validity": _classify_validity(record.get("metadata", {}), as_of),
+        "direct": view["direct"],
+        "lineage": view["lineage"],
+    }
+    if json_output:
+        safe_print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    safe_print(f"memory_id={record.get('memory_id')} path={record.get('path')}")
+    safe_print(f"title={record.get('title')} schema={record.get('schema_version')}")
+    safe_print(f"metadata={json.dumps(record.get('metadata', {}), ensure_ascii=False, sort_keys=True)}")
+    safe_print(f"validity={result['validity']}")
+    safe_print(f"supersedes={','.join(view['direct']['supersedes']) or 'none'}")
+    safe_print(f"superseded-by={','.join(view['direct']['superseded_by']) or 'none'}")
+    safe_print(f"ancestors={','.join(item['memory_id'] for item in view['lineage']['ancestors']) or 'none'}")
+    safe_print(f"descendants={','.join(item['memory_id'] for item in view['lineage']['descendants']) or 'none'}")
+    return 0
+
+
+def cmd_memory_timeline(source=None, as_of=None, valid_from=None, valid_to=None, include_superseded=False, limit=10, json_output=False):
+    try:
+        if limit < 1:
+            raise MetadataValidationError("limit must be >= 1")
+        _normalize_source(source)
+        if as_of is not None:
+            _normalize_time(as_of, "as_of")
+        filtered_from = _normalize_time(valid_from, "from") if valid_from is not None else None
+        filtered_to = _normalize_time(valid_to, "to") if valid_to is not None else None
+        if filtered_from is not None and filtered_to is not None and filtered_to <= filtered_from:
+            raise MetadataValidationError("to must be later than from")
+    except (MetadataValidationError, ValueError) as exc:
+        return _view_error("invalid_argument", str(exc), json_output)
+    payload, error = _load_complete_index_for_view()
+    if error:
+        return _view_error(error, "complete index unavailable", json_output)
+    records = _filter_timeline_records(payload["records"], source, as_of, valid_from, valid_to, include_superseded, payload.get("superseded_by", {}))
+    records = _sort_timeline_records(records)[:limit]
+    views = [_timeline_record_view(record, as_of, payload) for record in records]
+    if json_output:
+        safe_print(json.dumps({"records": views}, ensure_ascii=False, sort_keys=True))
+        return 0
+    for view in views:
+        metadata = view["metadata"]
+        safe_print(f"validity={view['validity']} trust={metadata.get('trust') or 'unknown'} source={metadata.get('source') or 'unknown'} memory_id={view['memory_id']} title={view['title']}")
     return 0
 
 def _render_index_markdown(payload, warnings):
@@ -3123,6 +3353,21 @@ def main():
     memory_search_parser.add_argument("--explain", action="store_true", help="Show lexical fields and normalized metadata")
     memory_search_parser.add_argument("--rank", choices=["bm25f", "legacy"], default="bm25f", help="Ranking scorer (default: bm25f)")
 
+    explain_parser = subparsers.add_parser("memory-explain", help="Explain one memory record and its lineage")
+    explain_parser.add_argument("memory_id")
+    explain_parser.add_argument("--depth", type=int, default=3)
+    explain_parser.add_argument("--as-of", default=None)
+    explain_parser.add_argument("--json", action="store_true", dest="json_output")
+
+    timeline_parser = subparsers.add_parser("memory-timeline", help="View memory records by valid time")
+    timeline_parser.add_argument("--source", default=None)
+    timeline_parser.add_argument("--as-of", default=None)
+    timeline_parser.add_argument("--from", dest="valid_from", default=None)
+    timeline_parser.add_argument("--to", dest="valid_to", default=None)
+    timeline_parser.add_argument("--include-superseded", action="store_true")
+    timeline_parser.add_argument("--limit", type=int, default=10)
+    timeline_parser.add_argument("--json", action="store_true", dest="json_output")
+
     knowledge_check_parser = subparsers.add_parser("knowledge-check", help="Validate moss-mem memory layout")
     knowledge_check_parser.add_argument("--strict", action="store_true", help="Fail when memory index warnings are present")
 
@@ -3262,6 +3507,10 @@ def main():
             args.explain,
             args.rank,
         ))
+    elif args.command == "memory-explain":
+        sys.exit(cmd_memory_explain(args.memory_id, args.depth, args.as_of, args.json_output))
+    elif args.command == "memory-timeline":
+        sys.exit(cmd_memory_timeline(args.source, args.as_of, args.valid_from, args.valid_to, args.include_superseded, args.limit, args.json_output))
     elif args.command == "knowledge-check":
         cmd_knowledge_check(getattr(args, 'strict', False))
     elif args.command == "summary-capture":

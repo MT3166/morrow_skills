@@ -698,6 +698,89 @@ class MemoryManagerCLITest(unittest.TestCase):
         self.assertEqual(fields["title"], ["frontmatter"])
         self.assertEqual(fields["__other__"], ["section", "needle"])
 
+    def test_p3_validity_and_lineage_helpers(self):
+        metadata = {"valid_from": "2026-11-01T00:00:00+00:00", "valid_to": "2026-12-01T00:00:00+00:00"}
+        self.assertEqual(memory_manager._classify_validity(metadata, "2026-10-31T16:00:00Z"), "upcoming")
+        self.assertEqual(memory_manager._classify_validity(metadata, "2026-11-15T00:00:00Z"), "active")
+        self.assertEqual(memory_manager._classify_validity(metadata, "2026-12-01T00:00:00Z"), "expired")
+        self.assertEqual(memory_manager._classify_validity({}, None), "unknown")
+        ids = ["mem_" + letter * 32 for letter in "abc"]
+        records = [
+            {"memory_id": ids[0], "metadata": {"supersedes": []}},
+            {"memory_id": ids[1], "metadata": {"supersedes": [ids[0]]}},
+            {"memory_id": ids[2], "metadata": {"supersedes": [ids[1]]}},
+        ]
+        payload = {"records": records, "superseded_by": {ids[0]: [ids[1]], ids[1]: [ids[2]], ids[2]: []}}
+        view = memory_manager._build_lineage_view(payload, ids[2], depth=2)
+        self.assertEqual(view["direct"]["supersedes"], [ids[1]])
+        self.assertEqual(view["lineage"]["ancestors"], [{"memory_id": ids[1], "depth": 1}, {"memory_id": ids[0], "depth": 2}])
+        self.assertEqual(memory_manager._build_lineage_view(payload, ids[2], depth=0)["lineage"]["ancestors"], [])
+        with self.assertRaises(ValueError):
+            memory_manager._build_lineage_view(payload, ids[2], depth=65)
+
+    def test_p3_timeline_filters(self):
+        ids = ["mem_" + letter * 32 for letter in "abc"]
+        records = []
+        for index, memory_id in enumerate(ids, 1):
+            records.append({
+                "id": index, "memory_id": memory_id, "schema_version": 2,
+                "path": f"task-{index}.md", "kind": "task", "title": f"T{index}",
+                "preview": "p", "created": "", "mtime_ns": index, "sections": {},
+                "metadata": {"schema_version": 2, "memory_id": memory_id, "source": "human:mt" if index < 3 else "other", "trust": None, "recorded_at": f"2026-01-0{index}T00:00:00+00:00", "valid_from": "2026-01-01T00:00:00+00:00" if index != 3 else None, "valid_to": "2026-02-01T00:00:00+00:00" if index == 1 else None, "supersedes": [], "legacy": False},
+            })
+        payload = {"records": records, "superseded_by": {ids[0]: [ids[1]], ids[1]: [], ids[2]: []}}
+        filtered = memory_manager._filter_timeline_records(records, source=" human:mt ", as_of="2026-01-15T00:00:00Z", include_superseded=True, superseded_by={ids[0]: [ids[1]], ids[1]: [], ids[2]: []})
+        self.assertEqual([record["memory_id"] for record in filtered], ids[:2])
+        with self.assertRaises(ValueError):
+            memory_manager._filter_timeline_records(records, valid_from="2026-02-01T00:00:00Z", valid_to="2026-02-01T00:00:00Z")
+        with self.assertRaises(ValueError):
+            memory_manager._filter_timeline_records(records, valid_from="2026-03-01T00:00:00Z", valid_to="2026-02-01T00:00:00Z")
+
+    def test_p3_view_cli(self):
+        tasks = self.project / ".moss-mem/tasks"
+        tasks.mkdir(parents=True)
+        (self.project / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+        (tasks / "MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8")
+        task = tasks / "record.md"
+        task.write_text(
+            "---\nschema_version: 2\nmemory_id: mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "recorded_at: 2026-11-01T00:00:00Z\nvalid_from: 2026-11-01T00:00:00Z\n---\n"
+            "# Record\n\n## Summary\nlineage needle\n", encoding="utf-8",
+        )
+        original = task.read_bytes()
+        self.assertEqual(self.run_cli("knowledge-index").returncode, 0)
+        explained = self.run_cli("memory-explain", "mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--json")
+        self.assertEqual(explained.returncode, 0, explained.stderr + explained.stdout)
+        body = json.loads(explained.stdout)
+        self.assertEqual(body["record"]["memory_id"], "mem_" + "a" * 32)
+        timeline = self.run_cli("memory-timeline", "--json")
+        self.assertEqual(timeline.returncode, 0, timeline.stderr + timeline.stdout)
+        self.assertIn("records", json.loads(timeline.stdout))
+        unknown = self.run_cli("memory-explain", "mem_ffffffffffffffffffffffffffffffff", "--json")
+        self.assertEqual(unknown.returncode, 2)
+        self.assertEqual(json.loads(unknown.stdout)["error"]["code"], "unknown_id")
+        self.assertEqual(task.read_bytes(), original)
+
+    def test_p3_json_view_rebuild_keeps_stdout_parseable(self):
+        (self.project / "MEMORY.md").write_text("# MEMORY\n", encoding="utf-8")
+        (self.project / ".moss-mem/tasks").mkdir(parents=True)
+        (self.project / ".moss-mem/tasks/MEMORY_ARCHIVE.md").write_text("# Archive\n", encoding="utf-8")
+        result = self.run_cli("memory-timeline", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(list(json.loads(result.stdout)), ["records"])
+        self.assertTrue(result.stderr == "" or "Memory index" in result.stderr)
+
+    def test_p3_timeline_invalid_source_is_structured_error(self):
+        result = self.run_cli("memory-timeline", "--source", "bad\nsource", "--json")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["error"]["code"], "invalid_argument")
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_p3_skill_documents_relation_time_views(self):
+        skill = (Path(__file__).parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        for text in ("memory-explain", "memory-timeline", "--depth", "--include-superseded", "structured error"):
+            self.assertIn(text, skill)
+
     def test_compact_summary_preserves_v2_metadata_marker(self):
         source = self._write_summary(
             "20260101-100000-v2.md",

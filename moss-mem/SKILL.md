@@ -134,6 +134,22 @@ stale, or mismatched stats block triggers a normal `knowledge-index` rebuild.
 The top-level index schema version is separate from each record's semantic
 `schema_version`; source Markdown remains unchanged during migration.
 
+P3 adds read-only relation and valid-time views:
+
+```bash
+python3 {base}/scripts/memory_manager.py memory-explain mem_... --depth 3 --json
+python3 {base}/scripts/memory_manager.py memory-timeline \
+  --as-of 2026-11-13T12:00:00Z --include-superseded --json
+```
+
+`memory-explain` follows `supersedes` and `superseded_by` with bounded BFS;
+`--depth` defaults to 3 and accepts `0..64`. `memory-timeline` uses UTC-normalized
+half-open intervals, defaults to `--limit 10`, and hides directly superseded
+records unless `--include-superseded` is present. Legacy virtual IDs are queryable.
+JSON mode writes exactly one JSON value to stdout; unknown IDs, invalid arguments,
+and unavailable indexes use structured error codes and non-zero exits. These views
+never rewrite Markdown or index sources.
+
 ## State Operations
 
 `state set k=v ...` is the only field-assignment verb; aliases `start`, `update`,
