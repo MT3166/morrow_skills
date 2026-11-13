@@ -1,50 +1,50 @@
 [
   {
     "id": 1,
-    "prompt": "项目环境只有 Python 标准库。初始化记忆、创建任务和 session summary 后，生成本地索引。",
-    "expected": "state init（或 auto-init）+ state set/commit + summary-capture；再 knowledge-index，生成 .moss-mem/index-cache/memory-index.json 与 memory-index.md；不安装/调用 mempalace 或其它外部记忆服务。",
-    "type": "local_index_generation"
+    "prompt": "这是一个只有 Python 标准库的新项目，没有 MEMORY.md。请开始任务：修复登录，下一步检查 auth.py；记录一条 refresh race 笔记，然后生成本地索引。",
+    "expected": "使用 state set/start 自动初始化 MEMORY.md，完成 state commit 后再写 note；执行 knowledge-index；只使用本地 Markdown 和 Python 标准库，不调用外部记忆服务。",
+    "type": "fresh_state_and_index"
   },
   {
     "id": 2,
-    "prompt": "搜索 token refresh race；它只存在于归档任务的 Key Decisions 中。",
-    "expected": "python3 {base}/scripts/memory_manager.py memory-search \"token refresh race\" --limit 10；返回该归档任务且排名靠前，输出 score/kind/path/title/命中摘要。",
+    "prompt": "搜索归档任务中的 token refresh race，并解释为什么它排在前面。",
+    "expected": "调用 memory-search --rank bm25f --explain --limit 10；解释 score、kind、path、title、excerpt 和字段贡献。不要假设 Key Decisions 一定压过同权重的 Decisions。",
     "type": "ranked_archive_search"
   },
   {
     "id": 3,
-    "prompt": "JSON 索引损坏后搜索 httpOnly cookie。",
-    "expected": "memory-search 先尝试一次 knowledge-index 重建；若仍失败则扫描源 Markdown 并标记 [INDEX-FALLBACK]；交接/写状态不阻塞。",
+    "prompt": "memory-index.json 已损坏。请搜索 httpOnly cookie，并确保脚本调用者在 JSON 模式下仍能解析 stdout。",
+    "expected": "memory-search 先尝试一次 knowledge-index；失败后扫描 Markdown 并标记 INDEX-FALLBACK。memory-search 本身是文本输出、没有 --json；只有 memory-explain/memory-timeline 的 JSON view 要求 stdout 单值且诊断走 stderr。",
     "type": "corrupt_index_recovery"
   },
   {
     "id": 4,
-    "prompt": "开始任务：修复登录，下一步检查 auth.py；中途记一条 refresh race 笔记，然后提交快照。",
-    "expected": "state set current_task=\"修复登录\" next_step=\"检查 auth.py\" status=\"🔧\" → state note \"refresh race\" → state commit -m \"…\"。不要求单独 state init（auto-init）。",
-    "type": "state_lifecycle"
+    "prompt": "现在要交接给下一个 Agent。请检查状态字段是否完整；如果不完整，修复后展示待写入的 last_action、key_decisions、landmines，等我确认后再完成归档。",
+    "expected": "执行 state validate；失败则 validate --fix；在 🔴 CHECKPOINT 展示三类交接字段；🛑 STOP 前不执行 status=✅/complete；完成后验证 MEMORY.md 为 Completed 且 archive 文件存在，不再追加 state commit。",
+    "type": "gated_handoff"
   },
   {
     "id": 5,
-    "prompt": "现在要交接给下一个 Agent，请完成交接流程。",
-    "expected": "state validate → (fail) validate --fix → 🔴 CHECKPOINT 起草 last_action/key_decisions/landmines 后 state set → 🛑 确认后 state set status=\"✅\"（或 complete -d）。禁止 complete 后再 state commit。验证 MEMORY.md ✅ + .moss-mem/tasks/archive/。",
-    "type": "handoff_protocol"
+    "prompt": "tasks 目录有 40 个旧任务。先预览压缩影响，再在确认后只压缩 tasks，保留最近 10 个，并验证 refresh race、httpOnly cookie、state show 都仍然可用。",
+    "expected": "先执行 state compact --scope tasks --dry-run，不改源文件；获得确认后执行 archive-summary --keep-recent 10 --yes；随后 knowledge-index、knowledge-check --strict、至少三项 memory-search 抽查和 state show。",
+    "type": "scoped_compaction"
   },
   {
     "id": 6,
-    "prompt": "tasks 目录已有 50+ 文件，帮我压缩记忆，并说明怎么验证没丢关键决策。",
-    "expected": "state compact --dry-run 预览 → 🛑 STOP 确认 → state compact --strategy archive-summary --keep-recent 10 --yes（若非交互）。归档到 .moss-mem/tasks/archive/。验证：knowledge-check --strict + memory-search 抽查 + state show；🔴 丢词则 archive-full。",
-    "type": "compaction_and_verify"
+    "prompt": "archive 有 60 个任务、summaries 有 35 个摘要。系统刚打印了阈值提醒，请清理所有旧文件。",
+    "expected": "将 nudge 解释为 STOP 提醒而非删除授权；先按 archive 和 summaries 分别 dry-run，用户确认后才 compact；禁止手删、静默删除或直接使用 --scope all --yes；完成后做索引和关键术语回归检查。",
+    "type": "threshold_safety"
   },
   {
     "id": 7,
-    "prompt": "长期使用后 archive 里有 60+ 归档任务、summaries 有 40+ session 摘要。请清理压缩，但 token refresh race 和 httpOnly cookie 这些关键决策必须还能搜到。",
-    "expected": "被动：commit/complete/summary-capture 后对 archive>50 / summaries>30 打出 🛑 STOP nudge（不是自动执行）。主动：state compact --scope archive|summaries|all --dry-run → 🛑/—yes；archive 二次 archive-summary 压缩；summaries 合并为 digest-YYYY-MM.md（保留 Decisions/Next Step）。然后 knowledge-index + memory-search 抽查关键决策；🔴 丢词则改 archive-full / 停止合并。禁止静默删除。",
-    "type": "multi_scope_lifecycle_compact"
+    "prompt": "请以 --json 查询 memory-explain 的未知 ID，并以非法 source 查询 memory-timeline；两个命令的 stdout 都必须能被单次 json.loads 解析。",
+    "expected": "两个命令都返回非零退出码和统一结构化错误对象；stdout 恰好一个 JSON 值，错误码区分 unknown_id 与 invalid_argument；不输出 traceback、重建日志或混合文本。",
+    "type": "json_error_contract"
   },
   {
     "id": 8,
-    "prompt": "summary-capture 后系统提示 summaries 超阈值了，我是不是该直接删旧 md？",
-    "expected": "否。nudge ≠ 授权删除。正确路径：state compact --scope summaries --dry-run → 用户确认 → digest 合并；或 --scope all。禁止手删/手改 archive 与 index-cache；验证用 memory-search + knowledge-check。",
-    "type": "nudge_not_delete_blacklist"
+    "prompt": "先用 memory-search 查询 2026-11-12T12:00:00Z 时有效、source 精确为 human:mt 且 trust 至少 0.8 的 cookie 记录；再用 memory-timeline 默认隐藏直接 superseded 的记录，并用 --include-superseded 查看关系。",
+    "expected": "memory-search 负责 --source、--min-trust、--as-of、--explain 的词法检索和元数据过滤；memory-timeline 负责 valid-time 视图与 superseded 隐藏/展开。source 大小写精确匹配，未知 trust 被排除，半开区间边界正确。",
+    "type": "semantic_filters_and_relations"
   }
 ]
