@@ -151,8 +151,10 @@ go to stderr. If the index is missing, stale, corrupt, or still invalid after on
 rebuild, the view stops with `{"error":{"code":"index_unavailable",...}}` and
 does not mix rebuild logs or traceback text into stdout. Unknown IDs return
 `unknown_id`; invalid `--depth`, time interval, or `--source` (newline or over 160
-characters) returns `invalid_argument`; both use exit code 2. These are `structured error`
-codes. `memory-search` is text output and has no `--json` mode. These views
+characters) returns `invalid_argument`; both use exit code 2. For `--depth`, this
+contract covers parsed integers outside `0..64`; a non-integer is rejected earlier
+by the command-line parser. These are `structured error` codes. `memory-search` is
+text output and has no `--json` mode. These views
 never rewrite Markdown or index sources.
 
 ## State Operations
