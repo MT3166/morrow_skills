@@ -146,8 +146,13 @@ python3 {base}/scripts/memory_manager.py memory-timeline \
 `--depth` defaults to 3 and accepts `0..64`. `memory-timeline` uses UTC-normalized
 half-open intervals, defaults to `--limit 10`, and hides directly superseded
 records unless `--include-superseded` is present. Legacy virtual IDs are queryable.
-JSON mode writes exactly one JSON value to stdout; unknown IDs, invalid arguments,
-and unavailable indexes use structured error codes and non-zero exits. These views
+JSON mode writes exactly one JSON value to stdout; diagnostics from an index rebuild
+go to stderr. If the index is missing, stale, corrupt, or still invalid after one
+rebuild, the view stops with `{"error":{"code":"index_unavailable",...}}` and
+does not mix rebuild logs or traceback text into stdout. Unknown IDs return
+`unknown_id`; invalid `--depth`, time interval, or `--source` (newline or over 160
+characters) returns `invalid_argument`; both use exit code 2. These are `structured error`
+codes. `memory-search` is text output and has no `--json` mode. These views
 never rewrite Markdown or index sources.
 
 ## State Operations
