@@ -34,7 +34,7 @@ The skill uses Python's standard library only.
 | Build index | `python3 {base}/scripts/memory_manager.py knowledge-index` |
 | Search memory | `python3 {base}/scripts/memory_manager.py memory-search "refresh race" --limit 10` |
 | Layout validate | `python3 {base}/scripts/memory_manager.py knowledge-check --strict` |
-| Handoff validate | `python3 {base}/scripts/memory_manager.py state validate` then `state validate --fix` if needed |
+| Handoff validate | Run `python3 {base}/scripts/memory_manager.py state validate`; only when it exits 1, run `state validate --fix` and validate again |
 | Recover lock / interrupt | `python3 {base}/scripts/memory_manager.py state recover` |
 | Compact tasks | `python3 {base}/scripts/memory_manager.py state compact --scope tasks --dry-run` |
 | Compact archive / summaries / all | `python3 {base}/scripts/memory_manager.py state compact --scope all --dry-run` (or `archive` / `summaries`) |
